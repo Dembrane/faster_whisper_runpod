@@ -1,8 +1,6 @@
 import runpod
 import os
-import time
 import whisperx
-import gc 
 import base64
 import tempfile
 import requests

@@ -1,62 +1,45 @@
-FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu20.04
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
-# Set Work Directory
-WORKDIR /app
-
-# Environment variables
-ENV PYTHONUNBUFFERED=True
-ENV DEBIAN_FRONTEND=noninteractive
-ENV SHELL=/bin/bash
-
-
-
-# Update, upgrade, install packages and clean up
-RUN apt-get update && \
-    apt-get upgrade -y && \
-    apt-get install -y --no-install-recommends \
-    # Basic Utilities
-    bash \
-    ca-certificates \
-    curl \
-    git \
-    pkg-config \
-    zip \
+RUN apt-get update && apt-get install -y \
+    python3-pip \
     build-essential \
-    # Python and development tools
-    software-properties-common && \
-    add-apt-repository ppa:deadsnakes/ppa && \
-    apt-get update && \
-    apt-get install -y python3.10 python3.10-venv python3.10-distutils && \
-    apt-get autoremove -y && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    git \
+    net-tools \
+    wget \
+    nano \
+    htop \
+    && rm -rf /var/lib/apt/lists/*
 
-# Create and activate virtual environment
-RUN python3.10 -m venv venv
-ENV PATH="/app/venv/bin:$PATH"
+# Copy static FFmpeg binaries from official image
+COPY --from=mwader/static-ffmpeg:7.1.1 /ffmpeg /usr/local/bin/ffmpeg
+COPY --from=mwader/static-ffmpeg:7.1.1 /ffprobe /usr/local/bin/ffprobe
+RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
 
-# Upgrade pip and install base dependencies
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN useradd -m -u 1000 user
+USER user
+ENV HOME=/home/user
+ENV PATH="/home/user/.local/bin:$PATH"
+ENV PIP_CACHE_DIR=/home/user/.cache/pip
 
-# Install PyTorch separately with extended timeout
-RUN pip install --no-cache-dir --timeout=3000 \
-    torch==2.0.0 \
-    torchvision==0.15.0 \
-    torchaudio==2.0.0 \
-    -f https://download.pytorch.org/whl/cu118/torch_stable.html
+WORKDIR $HOME/app
 
-# Install Rust dependencies
-RUN pip install --no-cache-dir setuptools-rust==1.8.0
+RUN pip install --upgrade pip
 
-# Copy and install requirements with retry mechanism
-COPY requirements.txt .
+RUN pip install "setuptools>=64.0.0" wheel "setuptools_scm>=8.0" --upgrade
+# RUN pip install torch==2.5.1+cu121 torchvision==0.20.1 torchaudio==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+
+# RUN pip install whisperx==3.3.4
+
+COPY --chown=user ./requirements.txt requirements.txt
+
 RUN pip install -r requirements.txt
 
-# Copy your handler code
-COPY handler.py .
+COPY --chown=user . $HOME/app
 
-# Set Stop signal and CMD
-STOPSIGNAL SIGINT
+# for debugging
+# CMD ["tail", "-f", "/dev/null"]
+
+RUN pip install -e .
+
+# Run the runpod handler
 CMD ["python", "-u", "handler.py"]
