@@ -36,31 +36,26 @@ COPY --from=mwader/static-ffmpeg:7.1.1 /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=mwader/static-ffmpeg:7.1.1 /ffprobe /usr/local/bin/ffprobe
 RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
 
-# Create and activate virtual environment
 RUN python3.10 -m venv venv
 ENV PATH="/app/venv/bin:$PATH"
 
-# Upgrade pip and install base dependencies
-RUN pip install --upgrade pip setuptools wheel
-
-# Install PyTorch with smaller memory footprint
-RUN pip install --timeout=3000 \
-    torch==2.0.0 \
-    torchvision==0.15.0 \
-    torchaudio==2.0.0 \
-    -f https://download.pytorch.org/whl/cu118/torch_stable.html
-
 # Install requirements in smaller chunks to avoid memory issues
+RUN pip install --upgrade pip setuptools wheel
 COPY requirements.txt .
+RUN pip install -r requirements.txt
 
-# Install each package separately to avoid memory issues
-RUN pip install whisperx==3.3.4
-RUN pip install runpod==1.7.9  
-RUN pip install python-dotenv==1.1.0
+# ------------------- download model weights during build -------------------
+# This places the model inside /app/models so runtime startup is instant.
+# If the model is gated, pass a token at build time:  
+#   docker build --build-arg HF_TOKEN=xxx -t myimage .
+# The python snippet picks up that token automatically via the env-var.
+# ARG HF_TOKEN
+# ENV HF_TOKEN=${HF_TOKEN}
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='deepdml/faster-whisper-large-v3-turbo-ct2', local_dir='models', local_dir_use_symlinks=False, resume_download=True)"
+# ---------------------------------------------------------------------------
 
-# Copy your handler code
 COPY handler.py .
 
-# Set Stop signal and CMD
 STOPSIGNAL SIGINT
+
 CMD ["python", "-u", "handler.py"]
