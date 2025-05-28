@@ -4,6 +4,11 @@ import whisperx
 import base64
 import tempfile
 import requests
+import torch
+import gc
+import logging
+
+logger = logging.getLogger("handler")
 
 # CHECK THE ENV VARIABLES FOR DEVICE AND COMPUTE TYPE
 device = os.environ.get("DEVICE", "cuda")  # cpu if on Mac
@@ -13,6 +18,21 @@ whisper_model_name = "deepdml/faster-whisper-large-v3-turbo-ct2"
 batch_size = 1
 default_language_code = "en"
 
+# Download the model
+logger.info("Downloading the model")
+preload_model = whisperx.load_model(
+    whisper_model_name,
+    device,
+    compute_type=compute_type,
+    download_root="models",
+)
+logger.info("Model downloaded")
+
+logger.info("Cleaning up")
+del preload_model
+torch.cuda.empty_cache()
+gc.collect()
+logger.info("Cleaned up")
 
 def base64_to_tempfile(base64_data):
     """
@@ -86,7 +106,7 @@ def handler(event):
             },
         )
 
-        print(f"Model loaded: {model}")
+        logger.info(f"Model loaded: {model}")
 
         # Load the audio
         audio = whisperx.load_audio(audio_input)

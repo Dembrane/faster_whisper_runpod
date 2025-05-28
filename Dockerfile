@@ -51,7 +51,7 @@ RUN pip install -r requirements.txt
 # The python snippet picks up that token automatically via the env-var.
 # ARG HF_TOKEN
 # ENV HF_TOKEN=${HF_TOKEN}
-RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='deepdml/faster-whisper-large-v3-turbo-ct2', local_dir='models', local_dir_use_symlinks=False, resume_download=True)"
+# RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='deepdml/faster-whisper-large-v3-turbo-ct2', local_dir='models', local_dir_use_symlinks=False, resume_download=True)"
 # ---------------------------------------------------------------------------
 
 COPY handler.py .
