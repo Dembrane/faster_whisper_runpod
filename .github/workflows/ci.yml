@@ -11,7 +11,7 @@ jobs:
   ci-build-and-push:
     name: ci-build-and-push
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     
     steps:
       - name: Checkout Code
