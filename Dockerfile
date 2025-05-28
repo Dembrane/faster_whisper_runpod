@@ -1,45 +1,66 @@
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu20.04
 
-RUN apt-get update && apt-get install -y \
-    python3-pip \
-    build-essential \
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Set Work Directory
+WORKDIR /app
+
+# Environment variables
+ENV PYTHONUNBUFFERED=True
+ENV DEBIAN_FRONTEND=noninteractive
+ENV SHELL=/bin/bash
+ENV PIP_NO_CACHE_DIR=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Update, upgrade, install packages and clean up
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    curl \
     git \
-    net-tools \
-    wget \
-    nano \
-    htop \
-    && rm -rf /var/lib/apt/lists/*
+    pkg-config \
+    zip \
+    build-essential \
+    software-properties-common && \
+    add-apt-repository ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y python3.10 python3.10-venv python3.10-distutils && \
+    apt-get autoremove -y && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy static FFmpeg binaries from official image
 COPY --from=mwader/static-ffmpeg:7.1.1 /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=mwader/static-ffmpeg:7.1.1 /ffprobe /usr/local/bin/ffprobe
 RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
 
-RUN useradd -m -u 1000 user
-USER user
-ENV HOME=/home/user
-ENV PATH="/home/user/.local/bin:$PATH"
-ENV PIP_CACHE_DIR=/home/user/.cache/pip
+# Create and activate virtual environment
+RUN python3.10 -m venv venv
+ENV PATH="/app/venv/bin:$PATH"
 
-WORKDIR $HOME/app
+# Upgrade pip and install base dependencies
+RUN pip install --upgrade pip setuptools wheel
 
-RUN pip install --upgrade pip
+# Install PyTorch with smaller memory footprint
+RUN pip install --timeout=3000 \
+    torch==2.0.0 \
+    torchvision==0.15.0 \
+    torchaudio==2.0.0 \
+    -f https://download.pytorch.org/whl/cu118/torch_stable.html
 
-RUN pip install "setuptools>=64.0.0" wheel "setuptools_scm>=8.0" --upgrade
-# RUN pip install torch==2.5.1+cu121 torchvision==0.20.1 torchaudio==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+# Install requirements in smaller chunks to avoid memory issues
+COPY requirements.txt .
 
-# RUN pip install whisperx==3.3.4
+# Install each package separately to avoid memory issues
+RUN pip install whisperx==3.3.4
+RUN pip install runpod==1.7.9  
+RUN pip install python-dotenv==1.1.0
 
-COPY --chown=user ./requirements.txt requirements.txt
+# Copy your handler code
+COPY handler.py .
 
-RUN pip install -r requirements.txt
-
-COPY --chown=user . $HOME/app
-
-# for debugging
-# CMD ["tail", "-f", "/dev/null"]
-
-RUN pip install -e .
-
-# Run the runpod handler
+# Set Stop signal and CMD
+STOPSIGNAL SIGINT
 CMD ["python", "-u", "handler.py"]
