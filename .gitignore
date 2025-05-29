@@ -3,3 +3,6 @@ venv
 .venv
 models
 *.env
+.mypy_cache
+.ruff_cache
+.ropeproject

@@ -4,19 +4,14 @@ import base64
 import tempfile
 import requests
 import os
-import threading
 import torch
 from runpod import RunPodLogger
 from faster_whisper.tokenizer import Tokenizer
 from dataclasses import replace
-from langdetect import detect
-from litellm import completion
 from dotenv import load_dotenv
-import concurrent.futures
+from vllm import LLM
 
 load_dotenv()
-# Global lock to ensure thread-safe calls to detect()
-detector_lock = threading.Lock()
 
 logger = RunPodLogger()
 
@@ -38,17 +33,6 @@ else:
 WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "Systran/faster-whisper-large-v1")
 TASK = os.getenv("TASK", "transcribe")
 DEFAULT_LANGUAGE_CODE = "en"
-
-LITELLM_MODEL = os.getenv("LITELLM_MODEL")
-LITELLM_API_KEY = os.getenv("LITELLM_API_KEY")
-LITELLM_API_VERSION = os.getenv("LITELLM_API_VERSION")
-LITELLM_API_BASE = os.getenv("LITELLM_API_BASE")
-
-USE_LITELLM = False
-if LITELLM_MODEL and LITELLM_API_KEY:
-    USE_LITELLM = True
-    logger.info("Using LiteLLM for translation")
-
 
 # default to false
 DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
@@ -91,6 +75,15 @@ for lang in supported_languages:
 
 logger.info(f"Tokenizers created: {list(tokenizers.keys())}")
 
+# Initialize vLLM for segment processing
+VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "facebook/opt-125m")
+
+# Build LLM initialization kwargs
+llm_kwargs = {"model": VLLM_MODEL_NAME}
+
+logger.info(f"Loading vLLM model with args: {llm_kwargs}")
+llm = LLM(**llm_kwargs)
+sampling_params = llm.get_default_sampling_params()
 
 def base64_to_tempfile(base64_data):
     logger.debug("Decoding base64 audio data to tempfile.")
@@ -121,36 +114,6 @@ def download_url_to_mp3(url):
         return temp_file.name
     except Exception as e:
         logger.error(f"Error in download_url_to_mp3: {e}")
-        raise
-
-def translate_text(text, language):
-    logger.debug(f"Translating text to {language}. Text: {text}")
-
-    try:
-        response = completion(
-            model=str(LITELLM_MODEL),
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant that translates text to the target language.",
-                },
-                {
-                    "role": "user",
-                    "content": f"Translate the following text to {language}: \n\n {text}",
-                },
-            ],
-            api_key=LITELLM_API_KEY,
-            api_version=LITELLM_API_VERSION,
-            api_base=LITELLM_API_BASE,
-        )
-        logger.debug(f"Translation response: {response}")
-        try:
-            return response.choices[0].message.content  # type: ignore
-        except Exception as e:
-            logger.error(f"Error in translate_text: {e}")
-            return text
-    except Exception as e:
-        logger.error(f"Error in translate_text: {e}")
         raise
 
 def handler(event):
@@ -205,35 +168,34 @@ def handler(event):
         )
         logger.debug(f"Transcription result before processing: {result}")
 
-        def process_segment(segment_tuple):
-            i, segment = segment_tuple
-            segment_text = segment["text"]
-            with detector_lock:
-                detected_language = detect(segment_text)
-            logger.debug(f"Segment {i}: Detected language: {detected_language}, Text: {segment_text}")
-            if detected_language != job_input_language:
-                logger.info(f"Translating segment {i} from {detected_language} to {job_input_language}")
-                segment_text = translate_text(segment_text, job_input_language)
-            return (i, segment_text)
-
-        if USE_LITELLM:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=num_threads_available
-            ) as executor:
-                results = executor.map(process_segment, enumerate(result["segments"]))
-            sorted_results = sorted(results, key=lambda x: x[0])
-            translated_segments = [str(text) for _, text in sorted_results]
-
-            joined_text = " ".join(translated_segments)
-            logger.info(f"Joined text: {joined_text}")
-        else:
-            joined_text = " ".join([segment["text"] for segment in result["segments"]])
+        # Process segments with vLLM
+        segments = [segment["text"] for segment in result["segments"]]
+        proper_nouns = job_input.get("proper_nouns", [])
+        pn_str = ", ".join(proper_nouns) if proper_nouns else ""
+        prompts = []
+        for seg in segments:
+            prompt = f"{initial_prompt}\nSegment: {seg}\n"
+            if pn_str:
+                prompt += f"Proper nouns list (correct misspellings): {pn_str}\n"
+            prompt += (
+                "Instructions:\n"
+                "0. Correct misspellings of proper nouns based on the list above.\n"
+                f"1. If the text is not in {job_input_language}, translate it to {job_input_language}, preserving tone and meaning.\n"
+                "2. If the text has repeated words or seems like hallucination, wrap the original text in <hallucination_detected>...</hallucination_detected> and do not modify it.\n"
+                "Return only the processed text."
+            )
+            prompts.append(prompt)
+        outputs = llm.generate(prompts, sampling_params)
+        processed_segments = [out.outputs[0].text.strip() for out in outputs]
+        joined_text = " ".join(processed_segments)
+        logger.info(f"Joined processed segments: {joined_text}")
 
         if DEBUG:
             logger.info(f"Full model output: {result}")
 
         return {
             "model_output": result,
+            "processed_segments": processed_segments,
             "joined_text": joined_text,
         }
     except Exception as e:
