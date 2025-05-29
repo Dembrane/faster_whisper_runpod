@@ -3,16 +3,14 @@ import whisperx
 import base64
 import tempfile
 import requests
+import os
 import torch
 import logging
 from faster_whisper.tokenizer import Tokenizer
-from faster_whisper.transcribe import TranscriptionOptions
-from whisperx.asr import FasterWhisperPipeline
-from whisperx.vads import Pyannote
+from dataclasses import replace
 
 logger = logging.getLogger("handler")
 
-# check if cuda is available
 if not torch.cuda.is_available():
     logger.info("CUDA is not available")
     logger.info("Using CPU")
@@ -23,47 +21,41 @@ else:
     device = "cuda"
     compute_type = "float16"
 
-whisper_model_name = "Systran/faster-whisper-large-v3"
+whisper_model_name = os.getenv(
+    "WHISPER_MODEL_NAME", "Systran/faster-distil-whisper-large-v3"
+)
+task = os.getenv("TASK", "translate")
+default_language_code = "en"
+
 logger.info(f"Using model: {whisper_model_name}")
 
-default_language_code = "en"
 
 logger.info("Loading the models")
 
-model_dict = {
-    "en": None,
-    "nl": None,
-    # "fr": None,
-    # "de": None,
-    # "es": None,
-}
-
-for lang in model_dict:
-    logger.info(f"Loading model for {lang}")
-    model_dict[lang] = whisperx.load_model(
-        whisper_model_name,
-        lang,
-        device=device,
-        compute_type=compute_type,
-    )
+model = whisperx.load_model(
+    whisper_model_name,
+    device=device,
+    compute_type=compute_type,
+)
 
 logger.info("Models loaded")
 
 # Supported languages
-supported_languages = ["en", "nl"]
+supported_languages = os.getenv("SUPPORTED_LANGUAGES", "en,nl").split(",")
 
 # Prepare tokenizers for all supported languages
 tokenizers = {}
 for lang in supported_languages:
     logger.info(f"Creating tokenizer for {lang}")
     tokenizers[lang] = Tokenizer(
-        model_dict[lang].hf_tokenizer,
-        model_dict[lang].model.is_multilingual,
-        task="transcribe",
+        model.model.hf_tokenizer,
+        True,
+        task=task,
         language=lang,
     )
 
 logger.info("Tokenizers created")
+
 
 def base64_to_tempfile(base64_data):
     """
@@ -81,7 +73,7 @@ def base64_to_tempfile(base64_data):
     return temp_file.name
 
 
-def download_file(url):
+def download_url_to_mp3(url):
     """
     Download a file from a URL to a temporary file and return its path.
     """
@@ -110,7 +102,7 @@ def handler(event):
                     "initial_prompt": str,  # Initial prompt for the model (optional)
                 }
             }
-            Either "audio_base_64" or "audio_url" must be provided.
+            Either "audio_base_64" or "audio" (url) must be provided.
     """
     job_input = event["input"]
     job_input_audio_base_64 = job_input.get("audio_base_64")
@@ -123,7 +115,7 @@ def handler(event):
     if job_input_audio_base_64:
         audio_input = base64_to_tempfile(job_input_audio_base_64)
     elif job_input_audio_url and job_input_audio_url.startswith("http"):
-        audio_input = download_file(job_input_audio_url)
+        audio_input = download_url_to_mp3(job_input_audio_url)
     else:
         return "No audio input provided"
 
@@ -138,38 +130,20 @@ def handler(event):
         logger.info(f"Using language: {job_input_language}")
         tokenizer = tokenizers.get(job_input_language)
 
-        # Create ASR options with the initial prompt
-        asr_options = default_asr_options.copy()
-        asr_options["initial_prompt"] = initial_prompt
-
-        # Remove suppress_numerals from asr_options before creating TranscriptionOptions
-        suppress_numerals = asr_options.pop("suppress_numerals")
-        transcription_options = TranscriptionOptions(**asr_options)
-
-        vad_options = {
-            "chunk_size": 30,  # needed by silero since binarization happens before merge_chunks
-            "vad_onset": 0.500,
-            "vad_offset": 0.363,
+        new_options = {
+            "initial_prompt": initial_prompt,
         }
 
-        # Create pipeline for this request
-        pipeline = FasterWhisperPipeline(
-            model=model_dict[job_input_language],
-            options=transcription_options,
-            tokenizer=tokenizer,
-            language=job_input_language,
-            vad=Pyannote(torch.device(device), use_auth_token=None, **vad_options),
-            vad_params=vad_options,
-            suppress_numerals=suppress_numerals,
-        )
+        model.tokenizer = tokenizer
+        model.options = replace(model.options, **new_options)
 
         # Load the audio
         audio = whisperx.load_audio(audio_input)
 
         # Transcribe the audio
-        result = pipeline.transcribe(
+        result = model.transcribe(
             audio,
-            task="transcribe",
+            task=task,
             batch_size=8,
             language=job_input_language,
             print_progress=False,
