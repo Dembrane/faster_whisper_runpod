@@ -8,10 +8,15 @@ import torch
 from runpod import RunPodLogger
 from faster_whisper.tokenizer import Tokenizer
 from dataclasses import replace
+from langdetect import detect
+from litellm import completion
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = RunPodLogger()
 
-if not torch.cuda.is_available():
+if not torch.cuda.is_available() or os.getenv("USE_CPU") == "1":
     logger.info("CUDA is not available")
     logger.info("Using CPU")
     device = "cpu"
@@ -29,6 +34,10 @@ else:
 WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "Systran/faster-whisper-large-v1")
 TASK = os.getenv("TASK", "transcribe")
 DEFAULT_LANGUAGE_CODE = "en"
+LITELLM_MODEL = os.getenv("LITELLM_MODEL")
+LITELLM_API_KEY = os.getenv("LITELLM_API_KEY")
+LITELLM_API_VERSION = os.getenv("LITELLM_API_VERSION")
+LITELLM_API_BASE = os.getenv("LITELLM_API_BASE")
 # default to false
 DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 
@@ -68,56 +77,61 @@ for lang in supported_languages:
         language=lang,
     )
 
-logger.info("Tokenizers created")
+logger.info(f"Tokenizers created: {list(tokenizers.keys())}")
 
 
 def base64_to_tempfile(base64_data):
-    """
-    Decode base64 data and write it to a temporary file.
-    Returns the path to the temporary file.
-    """
-    # Decode the base64 data to bytes
-    audio_data = base64.b64decode(base64_data)
-
-    # Create a temporary file and write the decoded data
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-    with open(temp_file.name, "wb") as file:
-        file.write(audio_data)
-
-    return temp_file.name
+    logger.debug("Decoding base64 audio data to tempfile.")
+    try:
+        audio_data = base64.b64decode(base64_data)
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        with open(temp_file.name, "wb") as file:
+            file.write(audio_data)
+        logger.debug(f"Base64 audio written to tempfile: {temp_file.name}")
+        return temp_file.name
+    except Exception as e:
+        logger.error(f"Error in base64_to_tempfile: {e}")
+        raise
 
 
 def download_url_to_mp3(url):
-    """
-    Download a file from a URL to a temporary file and return its path.
-    """
-    response = requests.get(url)
-    if response.status_code != 200:
-        raise Exception("Failed to download file from URL")
+    logger.debug(f"Downloading audio from URL: {url}")
+    try:
+        response = requests.get(url)
+        logger.debug(f"Download response status: {response.status_code}")
+        if response.status_code != 200:
+            logger.error(f"Failed to download file from URL: {url}")
+            raise Exception("Failed to download file from URL")
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        temp_file.write(response.content)
+        temp_file.close()
+        logger.debug(f"Audio downloaded and saved to tempfile: {temp_file.name}")
+        return temp_file.name
+    except Exception as e:
+        logger.error(f"Error in download_url_to_mp3: {e}")
+        raise
 
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-    temp_file.write(response.content)
-    temp_file.close()
-    return temp_file.name
-
+def translate_text(text, language):
+    logger.debug(f"Translating text to {language}. Text: {text}")
+    try:
+        response = completion(
+            model=LITELLM_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that translates text to the target language."},
+                {"role": "user", "content": f"Translate the following text to {language}: \n\n {text}"}
+            ],
+            api_key=LITELLM_API_KEY,
+            api_version=LITELLM_API_VERSION,
+            api_base=LITELLM_API_BASE,
+        )
+        logger.debug(f"Translation response: {response}")
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Error in translate_text: {e}")
+        raise
 
 def handler(event):
-    """
-    Run inference on the model.
-
-    Args:
-        event (dict): The input event containing the audio data.
-            The event should have the following structure:
-            {
-                "input": {
-                    "audio_base_64": str,  # Base64-encoded audio data (optional)
-                    "audio": str,
-                    "language": str,        # Language code (optional, auto-detects if not provided)
-                    "initial_prompt": str,  # Initial prompt for the model (optional)
-                }
-            }
-            Either "audio_base_64" or "audio" (url) must be provided.
-    """
+    logger.info(f"Handler called with event: {event}")
     job_input = event["input"]
     job_input_audio_base_64 = job_input.get("audio_base_64")
     job_input_audio_url = job_input.get("audio")
@@ -125,16 +139,19 @@ def handler(event):
     initial_prompt = job_input.get("initial_prompt", "")
 
     logger.info(f"Job input: {job_input}")
+    logger.debug(f"audio_base_64 present: {bool(job_input_audio_base_64)}; audio_url: {job_input_audio_url}; language: {job_input_language}; initial_prompt: {initial_prompt}")
 
     if job_input_audio_base_64:
+        logger.debug("Audio input provided as base64.")
         audio_input = base64_to_tempfile(job_input_audio_base_64)
     elif job_input_audio_url and job_input_audio_url.startswith("http"):
+        logger.debug("Audio input provided as URL.")
         audio_input = download_url_to_mp3(job_input_audio_url)
     else:
+        logger.error("No audio input provided.")
         return "No audio input provided"
 
     try:
-        # Use default language if requested language is not supported
         if job_input_language not in supported_languages:
             logger.info(
                 f"Language {job_input_language} not supported, using default: {DEFAULT_LANGUAGE_CODE}"
@@ -142,23 +159,20 @@ def handler(event):
             job_input_language = DEFAULT_LANGUAGE_CODE
 
         logger.info(f"Using language: {job_input_language}")
-
         tokenizer = tokenizers.get(job_input_language)
+        logger.debug(f"Tokenizer for {job_input_language}: {tokenizer}")
 
         new_options = {
             "initial_prompt": initial_prompt,
-            # "best_of": 1,
-            # "beam_size": 1,
-            # "temperatures": [0.5, 0.7, 0.9],
         }
-
+        logger.debug(f"Setting model options: {new_options}")
         model.tokenizer = tokenizer
         model.options = replace(model.options, **new_options)
 
-        # Load the audio
+        logger.debug(f"Loading audio from: {audio_input}")
         audio = whisperx.load_audio(audio_input)
+        logger.debug("Audio loaded. Running transcription.")
 
-        # Transcribe the audio
         result = model.transcribe(
             audio,
             task=TASK,
@@ -166,18 +180,30 @@ def handler(event):
             language=job_input_language,
             print_progress=False,
         )
+        logger.debug(f"Transcription result: {result}")
 
-        joined_text = " ".join([x["text"] for x in result["segments"]])
+        translated_segments = []
+        for i, segment in enumerate(result["segments"]):
+            segment_text = segment["text"]
+            detected_language = detect(segment_text)
+            logger.debug(f"Segment {i}: Detected language: {detected_language}, Text: {segment_text}")
+            if detected_language != job_input_language:
+                logger.info(f"Translating segment {i} from {detected_language} to {job_input_language}")
+                segment_text = translate_text(segment_text, job_input_language)
+            translated_segments.append(segment_text)
+
+        joined_text = " ".join(translated_segments)
+        logger.info(f"Joined text: {joined_text}")
 
         if DEBUG:
-            logger.info(f"Result: {joined_text}")
+            logger.info(f"Full model output: {result}")
 
         return {
             "model_output": result,
             "joined_text": joined_text,
         }
     except Exception as e:
-        logger.error(f"An error occurred: {str(e)}")
+        logger.error(f"An error occurred: {str(e)}", exc_info=True)
         return f"Error transcribing audio: {e}"
 
 
