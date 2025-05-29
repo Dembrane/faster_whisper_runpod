@@ -113,6 +113,7 @@ def download_url_to_mp3(url):
 
 def translate_text(text, language):
     logger.debug(f"Translating text to {language}. Text: {text}")
+    
     try:
         response = completion(
             model=LITELLM_MODEL,
@@ -125,7 +126,11 @@ def translate_text(text, language):
             api_base=LITELLM_API_BASE,
         )
         logger.debug(f"Translation response: {response}")
-        return response.choices[0].message.content
+        try: 
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.warning(f"Error in translate_text: {e}")
+            return text
     except Exception as e:
         logger.error(f"Error in translate_text: {e}")
         raise
