@@ -15,30 +15,41 @@ if not torch.cuda.is_available():
     logger.info("CUDA is not available")
     logger.info("Using CPU")
     device = "cpu"
-    compute_type = "int8"
+    if torch.backends.mps.is_available():
+        logger.info("MPS is available. using float32")
+        compute_type = "float32"
+    else:
+        logger.info("MPS is not available. using int8")
+        compute_type = "int8"
 else:
-    logger.info("Using GPU")
+    logger.info("Using GPU / float16")
     device = "cuda"
     compute_type = "float16"
 
-whisper_model_name = os.getenv(
-    "WHISPER_MODEL_NAME", "Systran/faster-distil-whisper-large-v3"
-)
-task = os.getenv("TASK", "translate")
-default_language_code = "en"
+WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "Systran/faster-whisper-large-v1")
+TASK = os.getenv("TASK", "transcribe")
+DEFAULT_LANGUAGE_CODE = "en"
 
-logger.info(f"Using model: {whisper_model_name}")
+logger.info(f"Using model: {WHISPER_MODEL_NAME}")
 
 
 logger.info("Loading the models")
 
+num_threads_available = os.cpu_count()
+logger.info(f"threads available: {num_threads_available}")
+
 model = whisperx.load_model(
-    whisper_model_name,
+    WHISPER_MODEL_NAME,
     device=device,
     compute_type=compute_type,
+    download_root="models",
+    threads=num_threads_available,
 )
 
-logger.info("Models loaded")
+
+assert model.tokenizer is None, "Tokenizer is loaded. exit."
+
+logger.info(f"Model loaded: {model}")
 
 # Supported languages
 supported_languages = os.getenv("SUPPORTED_LANGUAGES", "en,nl").split(",")
@@ -49,8 +60,10 @@ for lang in supported_languages:
     logger.info(f"Creating tokenizer for {lang}")
     tokenizers[lang] = Tokenizer(
         model.model.hf_tokenizer,
-        True,
-        task=task,
+        # this has to be True, otherwise in Tokenizer self.language_code is set to "en"
+        multilingual=True,
+        # from load_model they are passed to the tokenizer
+        task=TASK,
         language=lang,
     )
 
@@ -107,7 +120,7 @@ def handler(event):
     job_input = event["input"]
     job_input_audio_base_64 = job_input.get("audio_base_64")
     job_input_audio_url = job_input.get("audio")
-    job_input_language = job_input.get("language", default_language_code)
+    job_input_language = job_input.get("language", DEFAULT_LANGUAGE_CODE)
     initial_prompt = job_input.get("initial_prompt", "")
 
     logger.info(f"Job input: {job_input}")
@@ -123,15 +136,19 @@ def handler(event):
         # Use default language if requested language is not supported
         if job_input_language not in supported_languages:
             logger.info(
-                f"Language {job_input_language} not supported, using default: {default_language_code}"
+                f"Language {job_input_language} not supported, using default: {DEFAULT_LANGUAGE_CODE}"
             )
-            job_input_language = default_language_code
+            job_input_language = DEFAULT_LANGUAGE_CODE
 
         logger.info(f"Using language: {job_input_language}")
+
         tokenizer = tokenizers.get(job_input_language)
 
         new_options = {
             "initial_prompt": initial_prompt,
+            # "best_of": 1,
+            # "beam_size": 1,
+            # "temperatures": [0.5, 0.7, 0.9],
         }
 
         model.tokenizer = tokenizer
@@ -143,11 +160,13 @@ def handler(event):
         # Transcribe the audio
         result = model.transcribe(
             audio,
-            task=task,
-            batch_size=8,
+            task=TASK,
+            batch_size=4,
             language=job_input_language,
             print_progress=False,
         )
+
+        logger.info(f"Result: {result}")
 
         return {
             "model_output": result,

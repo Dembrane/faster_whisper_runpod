@@ -1,6 +1,6 @@
 {
 	"input": {
-		"audio": "https://github.com/runpod-workers/sample-inputs/raw/refs/heads/main/audio/Arthur.mp3",
+		"audio": "https://ams3.digitaloceanspaces.com/dbr-echo-local-uploads/audio-chunks/7a0f0d76-daf5-40c0-8d10-aefa4b335215-e5688e04-fbee-45ef-be15-acdbe38bb6bc-audio_Arthur-%5BAudioTrimmer.com%5D.mp3?AWSAccessKeyId=DO00VRQY3P7N8LCC2CPF&Signature=EfIl7SlxfzaJ%2FE96Nw68x%2B%2FyYnI%3D&Expires=1748509985",
 		"language": "nl",
 		"initial_prompt": "Hallo, laten we beginnen. Eerst even een introductieronde en dan kunnen we aan de slag met de thema van vandaag."
 	}
