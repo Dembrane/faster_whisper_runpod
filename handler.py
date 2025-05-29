@@ -4,6 +4,7 @@ import base64
 import tempfile
 import requests
 import os
+import threading
 import torch
 from runpod import RunPodLogger
 from faster_whisper.tokenizer import Tokenizer
@@ -11,8 +12,11 @@ from dataclasses import replace
 from langdetect import detect
 from litellm import completion
 from dotenv import load_dotenv
+import concurrent.futures
 
 load_dotenv()
+# Global lock to ensure thread-safe calls to detect()
+detector_lock = threading.Lock()
 
 logger = RunPodLogger()
 
@@ -34,10 +38,18 @@ else:
 WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "Systran/faster-whisper-large-v1")
 TASK = os.getenv("TASK", "transcribe")
 DEFAULT_LANGUAGE_CODE = "en"
+
 LITELLM_MODEL = os.getenv("LITELLM_MODEL")
 LITELLM_API_KEY = os.getenv("LITELLM_API_KEY")
 LITELLM_API_VERSION = os.getenv("LITELLM_API_VERSION")
 LITELLM_API_BASE = os.getenv("LITELLM_API_BASE")
+
+USE_LITELLM = False
+if LITELLM_MODEL and LITELLM_API_KEY:
+    USE_LITELLM = True
+    logger.info("Using LiteLLM for translation")
+
+
 # default to false
 DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 
@@ -113,23 +125,29 @@ def download_url_to_mp3(url):
 
 def translate_text(text, language):
     logger.debug(f"Translating text to {language}. Text: {text}")
-    
+
     try:
         response = completion(
-            model=LITELLM_MODEL,
+            model=str(LITELLM_MODEL),
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that translates text to the target language."},
-                {"role": "user", "content": f"Translate the following text to {language}: \n\n {text}"}
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that translates text to the target language.",
+                },
+                {
+                    "role": "user",
+                    "content": f"Translate the following text to {language}: \n\n {text}",
+                },
             ],
             api_key=LITELLM_API_KEY,
             api_version=LITELLM_API_VERSION,
             api_base=LITELLM_API_BASE,
         )
         logger.debug(f"Translation response: {response}")
-        try: 
-            return response.choices[0].message.content
+        try:
+            return response.choices[0].message.content  # type: ignore
         except Exception as e:
-            logger.warning(f"Error in translate_text: {e}")
+            logger.error(f"Error in translate_text: {e}")
             return text
     except Exception as e:
         logger.error(f"Error in translate_text: {e}")
@@ -185,20 +203,31 @@ def handler(event):
             language=job_input_language,
             print_progress=False,
         )
-        logger.debug(f"Transcription result: {result}")
+        logger.debug(f"Transcription result before processing: {result}")
 
-        translated_segments = []
-        for i, segment in enumerate(result["segments"]):
+        def process_segment(segment_tuple):
+            i, segment = segment_tuple
             segment_text = segment["text"]
-            detected_language = detect(segment_text)
+            with detector_lock:
+                detected_language = detect(segment_text)
             logger.debug(f"Segment {i}: Detected language: {detected_language}, Text: {segment_text}")
             if detected_language != job_input_language:
                 logger.info(f"Translating segment {i} from {detected_language} to {job_input_language}")
                 segment_text = translate_text(segment_text, job_input_language)
-            translated_segments.append(segment_text)
+            return (i, segment_text)
 
-        joined_text = " ".join(translated_segments)
-        logger.info(f"Joined text: {joined_text}")
+        if USE_LITELLM:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=num_threads_available
+            ) as executor:
+                results = executor.map(process_segment, enumerate(result["segments"]))
+            sorted_results = sorted(results, key=lambda x: x[0])
+            translated_segments = [str(text) for _, text in sorted_results]
+
+            joined_text = " ".join(translated_segments)
+            logger.info(f"Joined text: {joined_text}")
+        else:
+            joined_text = " ".join([segment["text"] for segment in result["segments"]])
 
         if DEBUG:
             logger.info(f"Full model output: {result}")
@@ -208,7 +237,7 @@ def handler(event):
             "joined_text": joined_text,
         }
     except Exception as e:
-        logger.error(f"An error occurred: {str(e)}", exc_info=True)
+        logger.error(f"An error occurred: {str(e)}")
         return f"Error transcribing audio: {e}"
 
 
