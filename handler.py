@@ -5,11 +5,11 @@ import tempfile
 import requests
 import os
 import torch
-import logging
+from runpod import RunPodLogger
 from faster_whisper.tokenizer import Tokenizer
 from dataclasses import replace
 
-logger = logging.getLogger("handler")
+logger = RunPodLogger()
 
 if not torch.cuda.is_available():
     logger.info("CUDA is not available")
@@ -29,9 +29,10 @@ else:
 WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "Systran/faster-whisper-large-v1")
 TASK = os.getenv("TASK", "transcribe")
 DEFAULT_LANGUAGE_CODE = "en"
+# default to false
+DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 
 logger.info(f"Using model: {WHISPER_MODEL_NAME}")
-
 
 logger.info("Loading the models")
 
@@ -166,14 +167,17 @@ def handler(event):
             print_progress=False,
         )
 
-        logger.info(f"Result: {result}")
+        joined_text = " ".join([x["text"] for x in result["segments"]])
+
+        if DEBUG:
+            logger.info(f"Result: {joined_text}")
 
         return {
             "model_output": result,
-            "joined_text": " ".join([x["text"] for x in result["segments"]]),
+            "joined_text": joined_text,
         }
     except Exception as e:
-        logger.error(f"Error transcribing audio: {e}")
+        logger.error(f"An error occurred: {str(e)}")
         return f"Error transcribing audio: {e}"
 
 
