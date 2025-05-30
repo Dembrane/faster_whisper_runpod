@@ -1,5 +1,6 @@
-whisperx==3.3.4
-runpod==1.7.9
-python-dotenv==1.1.0
-langdetect==1.0.9
-litellm==1.59.*
+whisperx==3.3.*
+runpod==1.7.*
+python-dotenv==1.1.*
+vllm==0.8.*
+bitsandbytes==0.42.*
+flashinfer==0.1.1
