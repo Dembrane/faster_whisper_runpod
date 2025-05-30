@@ -76,10 +76,10 @@ for lang in supported_languages:
 logger.info(f"Tokenizers created: {list(tokenizers.keys())}")
 
 # Initialize vLLM for segment processing
-VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "facebook/opt-125m")
+VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "Qwen/Qwen2-0.5B")
 
 # Build LLM initialization kwargs
-llm_kwargs = {"model": VLLM_MODEL_NAME}
+llm_kwargs = {"model": VLLM_MODEL_NAME, "device": 'cuda'}
 
 logger.info(f"Loading vLLM model with args: {llm_kwargs}")
 llm = LLM(**llm_kwargs)
