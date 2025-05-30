@@ -9,7 +9,7 @@ from runpod import RunPodLogger
 from faster_whisper.tokenizer import Tokenizer
 from dataclasses import replace
 from dotenv import load_dotenv
-from vllm import LLM
+from transformers import pipeline
 
 load_dotenv()
 
@@ -75,15 +75,11 @@ for lang in supported_languages:
 
 logger.info(f"Tokenizers created: {list(tokenizers.keys())}")
 
-# Initialize vLLM for segment processing
-VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "facebook/opt-125m")
+# Initialize pipeline for segment processing
+VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "Qwen/Qwen2-0.5B")
 
-# Build LLM initialization kwargs
-llm_kwargs = {"model": VLLM_MODEL_NAME}
-
-logger.info(f"Loading vLLM model with args: {llm_kwargs}")
-llm = LLM(**llm_kwargs)
-sampling_params = llm.get_default_sampling_params()
+logger.info(f"Loading transformers pipeline with model: {VLLM_MODEL_NAME}")
+pipe = pipeline("text-generation", model=VLLM_MODEL_NAME, device='cpu')
 
 def base64_to_tempfile(base64_data):
     logger.debug("Decoding base64 audio data to tempfile.")
@@ -168,11 +164,12 @@ def handler(event):
         )
         logger.debug(f"Transcription result before processing: {result}")
 
-        # Process segments with vLLM
+        # Process segments with pipeline
         segments = [segment["text"] for segment in result["segments"]]
         proper_nouns = job_input.get("proper_nouns", [])
         pn_str = ", ".join(proper_nouns) if proper_nouns else ""
-        prompts = []
+        processed_segments = []
+        
         for seg in segments:
             prompt = f"{initial_prompt}\nSegment: {seg}\n"
             if pn_str:
@@ -184,9 +181,12 @@ def handler(event):
                 "2. If the text has repeated words or seems like hallucination, wrap the original text in <hallucination_detected>...</hallucination_detected> and do not modify it.\n"
                 "Return only the processed text."
             )
-            prompts.append(prompt)
-        outputs = llm.generate(prompts, sampling_params)
-        processed_segments = [out.outputs[0].text.strip() for out in outputs]
+            
+            messages = [{"role": "user", "content": prompt}]
+            result_gen = pipe(messages)
+            processed_text = result_gen[0]['generated_text'][-1]['content'].strip()
+            processed_segments.append(processed_text)
+            
         joined_text = " ".join(processed_segments)
         logger.info(f"Joined processed segments: {joined_text}")
 
