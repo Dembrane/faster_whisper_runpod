@@ -123,6 +123,7 @@ def download_url_to_mp3(url):
         logger.error(f"Error in download_url_to_mp3: {e}")
         raise
 
+
 def translate_text(text, language):
     logger.debug(f"Translating text to {language}. Text: {text}")
 
@@ -153,6 +154,7 @@ def translate_text(text, language):
         logger.error(f"Error in translate_text: {e}")
         raise
 
+
 def handler(event):
     logger.info(f"Handler called with event: {event}")
     job_input = event["input"]
@@ -160,9 +162,12 @@ def handler(event):
     job_input_audio_url = job_input.get("audio")
     job_input_language = job_input.get("language", DEFAULT_LANGUAGE_CODE)
     initial_prompt = job_input.get("initial_prompt", "")
+    conversation_chunk_id = job_input.get("conversation_chunk_id", "")
 
     logger.info(f"Job input: {job_input}")
-    logger.debug(f"audio_base_64 present: {bool(job_input_audio_base_64)}; audio_url: {job_input_audio_url}; language: {job_input_language}; initial_prompt: {initial_prompt}")
+    logger.debug(
+        f"audio_base_64 present: {bool(job_input_audio_base_64)}; audio_url: {job_input_audio_url}; language: {job_input_language}; initial_prompt: {initial_prompt}"
+    )
 
     if job_input_audio_base_64:
         logger.debug("Audio input provided as base64.")
@@ -210,9 +215,13 @@ def handler(event):
             segment_text = segment["text"]
             with detector_lock:
                 detected_language = detect(segment_text)
-            logger.debug(f"Segment {i}: Detected language: {detected_language}, Text: {segment_text}")
+            logger.debug(
+                f"Segment {i}: Detected language: {detected_language}, Text: {segment_text}"
+            )
             if detected_language != job_input_language:
-                logger.info(f"Translating segment {i} from {detected_language} to {job_input_language}")
+                logger.info(
+                    f"Translating segment {i} from {detected_language} to {job_input_language}"
+                )
                 segment_text = translate_text(segment_text, job_input_language)
             return (i, segment_text)
 
@@ -233,8 +242,8 @@ def handler(event):
             logger.info(f"Full model output: {result}")
 
         return {
-            "model_output": result,
             "joined_text": joined_text,
+            "conversation_chunk_id": conversation_chunk_id,
         }
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}")
