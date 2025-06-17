@@ -166,8 +166,11 @@ def handler(event):
 	job_input_audio_url = job_input.get("audio")
 	job_input_language = job_input.get("language", DEFAULT_LANGUAGE_CODE)
 	initial_prompt = job_input.get("initial_prompt", "")
-	conversation_chunk_id = job_input.get("conversation_chunk_id", "")
 	enable_timestamps = job_input.get("enable_timestamps", False)
+	# metadata
+	conversation_id = job_input.get("conversation_id", "")
+	conversation_chunk_id = job_input.get("conversation_chunk_id", "")
+	metadata_str = job_input.get("metadata_str", "")
 
 	logger.info(f"Job input: {job_input}")
 	logger.debug(
@@ -245,18 +248,27 @@ def handler(event):
 			joined_text = " ".join(translated_segments)
 		else:
 			joined_text = " ".join([segment["text"] for segment in result["segments"]])
+		
+		common_result = {
+			# metadata
+			"conversation_id": conversation_id,
+			"conversation_chunk_id": conversation_chunk_id,
+			"metadata_str": metadata_str,
+			"enable_timestamps": enable_timestamps,
+			"language": job_input_language,
+			"joined_text": joined_text,
+		}
 
 		if enable_timestamps:
 			return {
-				"conversation_chunk_id": conversation_chunk_id,
-				"joined_text": joined_text,
+				**common_result,
 				"segments": result["segments"],
 			}
 		else:
 			return {
-				"conversation_chunk_id": conversation_chunk_id,
-				"joined_text": joined_text,
+				**common_result,
 			}
+
 	except Exception as e:
 		logger.error(f"An error occurred: {str(e)}")
 		return f"Error transcribing audio: {e}"

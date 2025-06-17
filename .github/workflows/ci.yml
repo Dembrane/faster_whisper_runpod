@@ -38,9 +38,13 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ${{ secrets.AZURE_REGISTRY_LOGIN_SERVER }}/runpod_whisper:${{ github.sha }}
+          tags: |
+            ${{ secrets.AZURE_REGISTRY_LOGIN_SERVER }}/runpod_whisper:${{ github.sha }}
+            ${{ secrets.AZURE_REGISTRY_LOGIN_SERVER }}/runpod_whisper:latest
           # Enhanced cache settings
           cache-from: |
             type=gha,scope=runpod_whisper
             type=registry,ref=${{ secrets.AZURE_REGISTRY_LOGIN_SERVER }}/runpod_whisper:latest
-          cache-to: type=gha,scope=runpod_whisper,mode=max 
+          cache-to: |
+            type=gha,scope=runpod_whisper,mode=max
+            type=registry,ref=${{ secrets.AZURE_REGISTRY_LOGIN_SERVER }}/runpod_whisper:latest,mode=max

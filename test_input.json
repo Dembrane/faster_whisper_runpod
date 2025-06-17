@@ -3,7 +3,9 @@
     "audio": "https://github.com/runpod-workers/sample-inputs/raw/refs/heads/main/audio/Arthur.mp3",
     "language": "nl",
     "initial_prompt": "Hallo, laten we beginnen. Eerst even een introductieronde en dan kunnen we aan de slag met de thema van vandaag.",
-    "conversation_chunk_id": "123",
-    "enable_timestamps": false
+    "conversation_id": "123",
+    "conversation_chunk_id": "456",
+    "metadata_str": "This is a test metadata string",
+    "enable_timestamps": true
   }
 }
