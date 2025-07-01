@@ -225,7 +225,11 @@ def handler(event):
 			i, segment = segment_tuple
 			segment_text = segment["text"]
 			with detector_lock:
-				detected_language = detect(segment_text)
+				try:
+					detected_language = detect(segment_text)
+				except Exception as e:
+					logger.error(f"Error in detect: {e}")
+					detected_language = job_input_language
 			logger.debug(f"Segment {i}: Detected language: {detected_language}")
 			if detected_language != job_input_language:
 				logger.info(
