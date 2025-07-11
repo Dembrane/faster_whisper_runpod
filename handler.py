@@ -14,7 +14,7 @@ from langdetect import detect
 from litellm import completion
 from litellm.exceptions import Timeout
 from dotenv import load_dotenv
-import traceback  # Added back for stack trace logging
+import traceback
 
 load_dotenv()
 # Global lock to ensure thread-safe calls to detect()
@@ -379,13 +379,6 @@ def handler(event):
 			"hallucination_score": hallucination_score,
 			"hallucination_reason": hallucination_reason if hallucination_score > 0 else "",
 		}
-
-		# save this to output-partial.json if DEBUG is true
-		if DEBUG:
-			import json
-			documents_path = os.path.expanduser("~/Documents/output-partial.json")
-			with open(documents_path, "w") as f:
-				json.dump(common_result, f)
 
 		try:
 			if audio_input:

@@ -1,164 +1,314 @@
-# RunPod Whisper Transcription Serverless Worker
-[![Ask DeepWiki](https://devin.ai/assets/askdeepwiki.png)](https://deepwiki.com/dembrane/runpod-whisper)
-
-This repository contains a serverless worker for RunPod designed to perform audio transcription using WhisperX. It can process audio provided as a base64 encoded string or a direct URL.
+# Dembrane RunPod Whisper
 
 ## Overview
 
-The `runpod-whisper` worker leverages the power of WhisperX (which uses faster-whisper) to provide fast and accurate audio transcriptions. It's built to be deployed on RunPod as a serverless endpoint, automatically scaling with demand. The worker supports multiple languages, configurable model selection, and can run on CPU or GPU.
+The runpod-whisper worker uses WhisperX (which uses faster-whisper) to provide fast and accurate audio transcriptions. Built for deployment on RunPod as a serverless endpoint, the worker automatically scales with demand. The worker supports multiple languages, configurable model selection, and runs on CPU or GPU.
 
 ## Features
 
-*   **Audio Input Flexibility**: Accepts audio via base64 encoded strings or direct URLs.
-*   **WhisperX Powered**: Utilizes WhisperX for efficient and accurate transcription.
-*   **Configurable Model**: The specific Whisper model can be chosen via an environment variable (defaults to `Systran/faster-whisper-large-v1`).
-*   **Multi-Language Support**: Transcribe audio in various languages. Tokenizers for supported languages are pre-loaded for faster processing.
-*   **Automatic Hardware Detection**: Optimally uses available hardware, selecting CUDA for GPU acceleration (with `float16`) or CPU (with `float32` or `int8`).
-*   **RunPod Optimized**: Designed as a standard RunPod serverless handler.
+### Core Capabilities
+
+* **Fast WhisperX transcription** – Low-latency, accurate speech-to-text conversion
+* **Optional LiteLLM translation** – Automatically translates segments not in the requested language
+* **Hallucination detection** – LLM assigns a hallucination score (0.0–1.0) with reasoning to assess reliability
+* **Segment-level timestamps** – Set `enable_timestamps: true` to include start and end times for each segment
+* **Thread-safe language detection** – Reliable detection of segment languages for translation decisions
+
+### Additional Features
+
+* **Flexible audio input** – Accept base64 blobs or remote URLs
+* **Configurable model and multi-language support** – Choose any WhisperX-compatible model and preload tokenizers
+* **Optimized for RunPod with automatic hardware detection** – Seamlessly uses GPU (float16) or CPU (int8/float32)
+* **Automatic cleanup** – Temporary files are removed after processing
+* **Comprehensive error handling** – Detailed error reporting with metadata preservation
 
 ## Environment Variables
 
-The behavior of the worker can be configured through the following environment variables:
+Configure the worker behavior through these environment variables:
 
-*   `WHISPER_MODEL_NAME`: The Hugging Face model name for WhisperX to use.
-    *   Default: `"Systran/faster-whisper-large-v1"`
-*   `TASK`: The task for Whisper (e.g., "transcribe").
-    *   Default: `"transcribe"`
-*   `DEFAULT_LANGUAGE_CODE`: The default language code to use if none is specified in the request.
-    *   Default: `"en"`
-*   `SUPPORTED_LANGUAGES`: A comma-separated list of language codes for which tokenizers should be pre-loaded (e.g., "en,nl,es,fr").
-    *   Default: `"en,nl"`
-*   `DEBUG`: Set to `"true"`, `"1"`, or `"yes"` to enable additional debug logging.
-    *   Default: `"false"`
+### Core Configuration
+
+* `WHISPER_MODEL_NAME`: The Hugging Face model name for WhisperX
+    * Default: `"Systran/faster-whisper-large-v1"`
+* `TASK`: The Whisper task type
+    * Default: `"transcribe"`
+* `DEFAULT_LANGUAGE_CODE`: Default language code when none specified in request
+    * Default: `"en"`
+* `SUPPORTED_LANGUAGES`: Comma-separated list of language codes for pre-loaded tokenizers
+    * Default: `"en,nl"`
+    * Example: `"en,nl,es,fr,de"`
+
+### Performance Settings
+
+* `BATCH_SIZE`: Number of audio segments processed per batch
+    * Default: `"8"`
+* `USE_CPU`: Force CPU execution even when GPU is available
+    * Default: Not set (auto-detect)
+    * Set to `"1"` to force CPU usage
+* `DEBUG`: Enable detailed debug logging
+    * Default: `"false"`
+    * Set to `"true"`, `"1"`, or `"yes"` to enable
+
+### LiteLLM Integration
+
+Configure these variables to enable translation and hallucination detection:
+
+* `LITELLM_MODEL`: LiteLLM model identifier (required for LiteLLM features)
+* `LITELLM_API_KEY`: API key for LiteLLM service (required)
+* `LITELLM_API_BASE`: Base URL for LiteLLM API (optional)
+* `LITELLM_API_VERSION`: API version for LiteLLM (optional)
 
 ## Handler API
 
 The worker exposes a single handler that expects a JSON payload.
 
-### Input Payload (`event["input"]`)
+### Input Payload
 
-The `input` object in the JSON payload should contain:
+The `input` object in the JSON payload contains:
 
 ```json
 {
     "audio_base_64": "string (optional)",
     "audio": "string (URL, optional)",
     "language": "string (optional, e.g., 'en', 'nl')",
-    "initial_prompt": "string (optional)"
+    "initial_prompt": "string (optional)",
+    "enable_timestamps": false,
+    "conversation_id": "string (optional)",
+    "conversation_chunk_id": "string (optional)",
+    "metadata_str": "string (optional)"
 }
 ```
 
-*   `audio_base_64` (string, optional): Base64 encoded audio data.
-*   `audio` (string, optional): A URL pointing to an audio file (e.g., MP3).
-*   One of `audio_base_64` or `audio` must be provided.
-*   `language` (string, optional): The language code of the audio. If not provided, or if the provided language is not in `SUPPORTED_LANGUAGES`, it defaults to `DEFAULT_LANGUAGE_CODE`.
-*   `initial_prompt` (string, optional): An initial prompt to guide the transcription model.
+#### Field Descriptions
 
-**Example Input (`test_input.json`):**
+* `audio_base_64` (string, optional): Base64 encoded audio data
+* `audio` (string, optional): URL pointing to an audio file (must start with "http")
+* **Note**: Either `audio_base_64` or `audio` must be provided
+* `language` (string, optional): Target language code. Defaults to `DEFAULT_LANGUAGE_CODE` if missing or unsupported
+* `initial_prompt` (string, optional): Initial prompt to guide transcription and provide context for hallucination detection
+* `enable_timestamps` (boolean, optional): If `true`, response includes segment-level timestamp data
+* `conversation_id`, `conversation_chunk_id`, `metadata_str` (strings, optional): Metadata fields echoed back in response
+
+### Example Input
+
 ```json
 {
-	"input": {
-		"audio": "https://ams3.digitaloceanspaces.com/dbr-echo-local-uploads/audio-chunks/7a0f0d76-daf5-40c0-8d10-aefa4b335215-e5688e04-fbee-45ef-be15-acdbe38bb6bc-audio_Arthur-%5BAudioTrimmer.com%5D.mp3?AWSAccessKeyId=DO00VRQY3P7N8LCC2CPF&Signature=EfIl7SlxfzaJ%2FE96Nw68x%2B%2FyYnI%3D&Expires=1748509985",
-		"language": "nl",
-		"initial_prompt": "Hallo, laten we beginnen. Eerst even een introductieronde en dan kunnen we aan de slag met de thema van vandaag."
-	}
+    "input": {
+        "audio": "https://example.com/audio.mp3",
+        "language": "nl",
+        "initial_prompt": "Hallo, laten we beginnen. Eerst even een introductieronde.",
+        "enable_timestamps": true,
+        "conversation_id": "123",
+        "conversation_chunk_id": "456"
+    }
 }
 ```
 
 ### Output Payload
 
-If successful, the handler returns a JSON object:
+#### Success Response
 
 ```json
 {
-    "model_output": { /* Full WhisperX transcription result object */ },
-    "joined_text": "string (Concatenated text from all segments)"
+    "conversation_id": "123",
+    "conversation_chunk_id": "456",
+    "metadata_str": "optional string",
+    "enable_timestamps": true,
+    "language": "nl",
+    "joined_text": "... full transcription ...",
+    "translation_error": false,
+    "hallucination_score": 0.2,
+    "hallucination_reason": "Minor repetitions detected",
+    "segments": [
+        {
+            "text": "Segment text",
+            "start": 0.0,
+            "end": 2.5
+        }
+    ]
 }
 ```
 
-*   `model_output`: The detailed transcription result from WhisperX, including segments, timestamps, etc.
-*   `joined_text`: A single string containing all transcribed text segments joined together.
+#### Response Fields
 
-If an error occurs, a string describing the error is returned.
+* `joined_text`: Complete transcription text (translated if needed)
+* `translation_error`: `true` if any translation failed or timed out
+* `hallucination_score`: Float 0.0–1.0 indicating severity:
+    * 0.0: No hallucination detected
+    * 0.1–0.3: Minor errors, meaning intact
+    * 0.4–0.6: Moderate errors, partial distortion
+    * 0.7–0.9: Severe errors, strong distortion
+    * 1.0: Complete hallucination/nonsense
+* `hallucination_reason`: Brief explanation (max 20 words) when score > 0
+* `segments`: Array of segment objects (only when `enable_timestamps: true`)
+
+#### Error Response
+
+```json
+{
+    "conversation_id": "123",
+    "conversation_chunk_id": "456",
+    "metadata_str": "",
+    "enable_timestamps": false,
+    "language": "en",
+    "error": "No audio input provided",
+    "message": "An unhandled error occurred while processing the request."
+}
+```
 
 ## Getting Started
 
 ### Prerequisites
 
-*   Docker
-*   An account on [RunPod](https://runpod.io) if you plan to deploy it.
-*   NVIDIA drivers and CUDA toolkit if you intend to build and run with GPU support locally.
+* Docker
+* RunPod account for deployment
+* NVIDIA drivers and CUDA toolkit for local GPU testing
 
 ### Building the Docker Image
 
-1.  Clone the repository:
+1. Clone the repository:
     ```bash
     git clone https://github.com/dembrane/runpod-whisper.git
     cd runpod-whisper
     ```
 
-2.  Build the Docker image:
+2. Build the Docker image:
     ```bash
     docker build -t dembrane/runpod-whisper .
     ```
 
-    *   **Note on Gated Models**: If you use a gated model from Hugging Face that requires authentication, you can pass your Hugging Face token as a build argument. The `Dockerfile` includes a commented-out section for downloading model weights during build time:
-        ```dockerfile
-        # ARG HF_TOKEN
-        # ENV HF_TOKEN=${HF_TOKEN}
-        # RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='your-gated-model', local_dir='models', local_dir_use_symlinks=False, resume_download=True)"
-        ```
-        To use this, uncomment the relevant lines in the `Dockerfile` and build with:
-        ```bash
-        docker build --build-arg HF_TOKEN=your_hf_token -t dembrane/runpod-whisper .
-        ```
+### Using Gated Models
+
+For Hugging Face gated models requiring authentication:
+
+1. Uncomment the relevant lines in the Dockerfile
+2. Build with your HF token:
+    ```bash
+    docker build --build-arg HF_TOKEN=your_hf_token -t dembrane/runpod-whisper .
+    ```
 
 ### Deploying to RunPod
 
-This image is designed for serverless deployment on RunPod.
-1.  Push the built Docker image to a container registry (e.g., Docker Hub, Azure Container Registry, GitHub Container Registry).
-2.  Create a new Serverless Endpoint on RunPod, pointing to your pushed image.
-3.  Configure the environment variables as needed in the RunPod endpoint settings.
+1. Push the Docker image to a container registry (Docker Hub, Azure Container Registry, GitHub Container Registry)
+2. Create a new Serverless Endpoint on RunPod using your image
+3. Configure environment variables in RunPod endpoint settings
 
 ## Configuration Details
 
 ### Model Selection
 
-The transcription model is specified by the `WHISPER_MODEL_NAME` environment variable. It should be a model compatible with WhisperX (typically faster-whisper models from Hugging Face). The default is `Systran/faster-whisper-large-v1`. Models are downloaded to the `models` directory within the container at runtime if not pre-downloaded during the build.
+The transcription model is specified by `WHISPER_MODEL_NAME`. Use any WhisperX-compatible model from Hugging Face. Models download to the `models` directory at runtime unless pre-downloaded during build.
 
 ### Language Support
 
-The `SUPPORTED_LANGUAGES` environment variable takes a comma-separated list of language codes (e.g., "en,es,fr,de,nl"). Tokenizers for these languages are pre-loaded when the worker starts, which can speed up the first request for each of these languages. If a request specifies a language not in this list, the `DEFAULT_LANGUAGE_CODE` (default "en") will be used.
+The `SUPPORTED_LANGUAGES` variable accepts comma-separated language codes (e.g., "en,es,fr,de,nl"). Tokenizers for these languages load at startup, improving first-request performance. Requests for unsupported languages fall back to `DEFAULT_LANGUAGE_CODE`.
 
 ### Compute Resources
 
-The `handler.py` script automatically detects if a CUDA-enabled GPU is available:
-*   **GPU**: Uses `cuda` device with `compute_type="float16"`.
-*   **CPU**: Uses `cpu` device. If MPS (Apple Silicon) is available, `compute_type="float32"` is used; otherwise, `compute_type="int8"` is used.
+The handler automatically detects available hardware:
 
-The number of CPU threads for the model is set to the available CPU count.
+* **GPU**: Uses `cuda` device with `compute_type="float16"`
+* **CPU with MPS** (Apple Silicon): Uses `cpu` device with `compute_type="float32"`
+* **CPU without MPS**: Uses `cpu` device with `compute_type="int8"`
+
+CPU threads are set to the available CPU count.
+
+### Translation Behavior
+
+When LiteLLM is configured:
+
+1. Each segment's language is detected using `langdetect`
+2. Segments not in the target language are buffered
+3. Contiguous non-target segments are translated together for efficiency
+4. Translation preserves proper nouns and technical terms
+5. Translation timeout is 10 seconds per request
+
+### Hallucination Detection
+
+When LiteLLM is configured, the system:
+
+1. Analyzes the complete transcription after translation
+2. Evaluates for common hallucination patterns:
+   * Excessive word/phrase repetition
+   * Nonsensical or contradictory sequences
+   * Abrupt topic changes
+   * Misplaced technical terms
+   * Transcribed filler sounds
+3. Returns a score and brief explanation
+4. Uses the initial prompt for context when available
 
 ## Local Testing
 
-Use `python handler.py` and it will read inputs from `test_input.json`.
+Run locally with test input:
+
+```bash
+python handler.py
+```
+
+The handler reads from `test_input.json` in the current directory.
 
 ## Dockerfile
 
-The `Dockerfile` sets up the environment for the worker:
-*   Base Image: `nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu20.04` for GPU support.
-*   Installs Python 3.10, FFmpeg (static binaries), and other system dependencies.
-*   Creates a Python virtual environment and installs dependencies from `requirements.txt` (`whisperx`, `runpod`, `python-dotenv`).
-*   Copies the `handler.py` script.
-*   Sets the default command to run `python -u handler.py`.
-*   Includes a commented-out section to optionally download model weights during the image build process, which can speed up cold starts.
+The Dockerfile configures the environment:
+
+* **Base Image**: `nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu20.04` for GPU support
+* **Dependencies**: Python 3.10, FFmpeg (static binaries), system libraries
+* **Python Environment**: Virtual environment with dependencies from `requirements.txt`
+* **Entry Point**: `python -u handler.py`
+
+### Key Dependencies
+
+* `whisperx`: Core transcription engine
+* `runpod`: Serverless framework
+* `langdetect`: Language detection for translation routing
+* `litellm`: LLM integration for translation and hallucination detection
+* `torch`: PyTorch for model execution
+* `python-dotenv`: Environment variable management
 
 ## CI/CD
 
-A GitHub Actions workflow is defined in `.github/workflows/ci.yml`. This workflow:
-*   Triggers on pushes to the `main` branch or can be manually dispatched (`workflow_dispatch`).
-*   Checks out the repository code.
-*   Sets up Docker Buildx for efficient image building.
-*   Logs into Azure Container Registry using secrets (`AZURE_REGISTRY_LOGIN_SERVER`, `AZURE_REGISTRY_USERNAME`, `AZURE_REGISTRY_PASSWORD`).
-*   Builds the Docker image using the `Dockerfile`.
-*   Pushes the built image to the specified Azure Container Registry, tagged with the Git commit SHA (`${{ secrets.AZURE_REGISTRY_LOGIN_SERVER }}/runpod_whisper:${{ github.sha }}`).
-*   Utilizes Docker layer caching (from GitHub Actions cache and the registry) to speed up subsequent builds.
+GitHub Actions workflow (`.github/workflows/ci.yml`):
+
+* **Triggers**: Push to `main` branch or manual dispatch
+* **Actions**:
+    * Builds Docker image
+    * Pushes to Azure Container Registry
+    * Tags with Git commit SHA
+    * Uses layer caching for efficiency
+
+### Required Secrets
+
+* `AZURE_REGISTRY_LOGIN_SERVER`
+* `AZURE_REGISTRY_USERNAME`
+* `AZURE_REGISTRY_PASSWORD`
+
+## Performance Considerations
+
+* **Cold Start**: Initial model loading takes 10-30 seconds depending on model size
+* **Batch Processing**: Adjust `BATCH_SIZE` based on available memory
+* **Translation**: Adds latency when segments need translation
+* **Hallucination Detection**: Adds 1-3 seconds for LLM analysis
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Out of Memory**: Reduce `BATCH_SIZE` or use smaller model
+2. **Translation Timeouts**: Check LiteLLM configuration and API limits
+3. **Unsupported Language**: Verify language code in `SUPPORTED_LANGUAGES`
+4. **Audio Download Fails**: Ensure URL is accessible and returns valid audio
+
+### Debug Mode
+
+Enable debug logging to troubleshoot:
+
+```bash
+DEBUG=true
+```
+
+## Security Considerations
+
+* Audio URLs must be publicly accessible
+* Temporary files are automatically cleaned up
+* API keys should be stored securely as environment variables
+* Consider network policies for production deployments
