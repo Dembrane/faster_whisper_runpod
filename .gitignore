@@ -3,3 +3,5 @@ venv
 .venv
 models
 *.env
+.DS_Store
+.claude

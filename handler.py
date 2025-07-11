@@ -5,14 +5,16 @@ import tempfile
 import requests
 import os
 import threading
+import enum
 import torch
 from runpod import RunPodLogger
 from faster_whisper.tokenizer import Tokenizer
 from dataclasses import replace
 from langdetect import detect
 from litellm import completion
+from litellm.exceptions import Timeout
 from dotenv import load_dotenv
-import concurrent.futures
+import traceback  # Added back for stack trace logging
 
 load_dotenv()
 # Global lock to ensure thread-safe calls to detect()
@@ -48,6 +50,7 @@ LITELLM_MODEL = os.getenv("LITELLM_MODEL")
 LITELLM_API_KEY = os.getenv("LITELLM_API_KEY")
 LITELLM_API_VERSION = os.getenv("LITELLM_API_VERSION")
 LITELLM_API_BASE = os.getenv("LITELLM_API_BASE")
+
 
 if LITELLM_MODEL and LITELLM_API_KEY:
 	USE_LITELLM = True
@@ -127,67 +130,156 @@ def download_url_to_mp3(url):
 		logger.error(f"Error in download_url_to_mp3: {e}")
 		raise
 
+class ExitCode(enum.Enum):
+	SUCCESS = 0
+	ERROR_TRANSLATING = 1
+	TIMEOUT = 2
 
-def translate_text(text, language):
+
+def translate_text(text, language) -> tuple[str, int]:
 	logger.debug(f"Translating text to {language}. Text: {text}")
 
 	try:
+		system_prompt = (
+			"""You are a helpful assistant that translates text to the target language.\n"
+			"Important guidelines:\n"
+			"- Preserve all proper nouns exactly as they appear\n"
+			"- Maintain the original meaning and context\n"
+			"- If you encounter technical terms or abbreviations, keep them unchanged\n"
+			"- Do not add explanations or commentary to the translation"""
+		)
+
 		response = completion(
 			model=str(LITELLM_MODEL),
 			messages=[
-				{
-					"role": "system",
-					"content": "You are a helpful assistant that translates text to the target language.",
-				},
+				{"role": "system", "content": system_prompt},
 				{
 					"role": "user",
-					"content": f"Translate the following text to {language}: \n\n {text}",
+					"content": f"Translate the following text to {language}. Only return the translation, nothing else: \n\n{text}",
 				},
 			],
 			api_key=LITELLM_API_KEY,
 			api_version=LITELLM_API_VERSION,
 			api_base=LITELLM_API_BASE,
+			timeout=10
 		)
 		logger.debug(f"Translation response: {response}")
-		try:
-			return response.choices[0].message.content  # type: ignore
-		except Exception as e:
-			logger.error(f"Error in translate_text: {e}")
-			return text
+		return response.choices[0].message.content, ExitCode.SUCCESS.value  # type: ignore
+	except Timeout as e:
+		logger.error(f"Timeout in translate_text: {e}")
+		return text, ExitCode.TIMEOUT.value
 	except Exception as e:
 		logger.error(f"Error in translate_text: {e}")
-		raise
+		return text, ExitCode.ERROR_TRANSLATING.value
+
+
+# -----------------------------------
+# Hallucination Detection
+# -----------------------------------
+
+
+def detect_hallucination(text: str, initial_prompt: str = "") -> tuple[float, str]:
+	"""Detect hallucinations in text using LLM analysis and return a score between 0 (no hallucination) and 1 (severe hallucination)."""
+	logger.debug(f"Checking for hallucinations in text: {text[:100]}...")
+
+	if not (LITELLM_MODEL and LITELLM_API_KEY):
+		# LiteLLM not configured; skip detection
+		return 0.0, ""
+
+	try:
+		context_info = (
+			f"\nContext from initial prompt: {initial_prompt}" if initial_prompt else ""
+		)
+
+		response = completion(
+			model=str(LITELLM_MODEL),
+			messages=[
+				{
+					"role": "system",
+					"content": (
+						"""You are an expert QA analyst for speech-to-text output. Your task is to detect hallucinations—words or passages that were not actually spoken but were invented by the ASR model.\n"
+						"\n"
+						"Evaluation criteria (assign ONE score):\n"
+						"0.0  – No hallucination detected.\n"
+						"0.1-0.3 – Minor: 1-2 short erroneous phrases, overall meaning intact.\n"
+						"0.4-0.6 – Moderate: Several errors that partially distort meaning.\n"
+						"0.7-0.9 – Severe: Frequent invented phrases or topic shifts that strongly distort meaning.\n"
+						"1.0  – Complete: Text is mostly or entirely hallucinated/nonsensical.\n"
+						"\n"
+						"Common hallucination signals to consider:\n"
+						"• Excessive repetition of words/phrases.\n"
+						"• Nonsensical or contradictory sequences.\n"
+						"• Abrupt topic changes without context.\n"
+						"• Technical terms used out of place.\n"
+						"• Filler sounds transcribed as words (um, uh, etc.).\n"
+						"\n"
+						"Respond ONLY with valid JSON: {\n"
+						"  \"hallucination_score\": <score from list above>,\n"
+						"  \"reason\": \"<max 20 words explaining key issues>\"\n"
+						"}"""
+					),
+				},
+				{
+					"role": "user",
+					"content": f"Analyze this transcribed audio for hallucinations:{context_info}\n\nText: {text}",
+				},
+			],
+			api_key=LITELLM_API_KEY,
+			api_version=LITELLM_API_VERSION,
+			api_base=LITELLM_API_BASE,
+			response_format={"type": "json_object"},
+			timeout=10
+		)
+
+		result = response.choices[0].message.content
+		import json
+		parsed = json.loads(result)
+		score = parsed.get("hallucination_score", 0.0)
+		# Ensure score is a float between 0 and 1 in 0.1 increments
+		try:
+			score = float(score)
+		except (TypeError, ValueError):
+			score = 0.0
+		return score, parsed.get("reason", "")
+	except Exception as e:
+		logger.error(f"Error in hallucination detection: {e}")
+		return 0.0, f"Detection error: {str(e)}"
 
 
 def handler(event):
-	logger.info(f"Handler called with event: {event}")
-	job_input = event["input"]
-	job_input_audio_base_64 = job_input.get("audio_base_64")
-	job_input_audio_url = job_input.get("audio")
-	job_input_language = job_input.get("language", DEFAULT_LANGUAGE_CODE)
-	initial_prompt = job_input.get("initial_prompt", "")
-	enable_timestamps = job_input.get("enable_timestamps", False)
-	# metadata
-	conversation_id = job_input.get("conversation_id", "")
-	conversation_chunk_id = job_input.get("conversation_chunk_id", "")
-	metadata_str = job_input.get("metadata_str", "")
-
-	logger.info(f"Job input: {job_input}")
-	logger.debug(
-		f"audio_base_64 present: {bool(job_input_audio_base_64)}; audio_url: {job_input_audio_url}; language: {job_input_language}; initial_prompt: {initial_prompt}"
-	)
-
-	if job_input_audio_base_64:
-		logger.debug("Audio input provided as base64.")
-		audio_input = base64_to_tempfile(job_input_audio_base_64)
-	elif job_input_audio_url and job_input_audio_url.startswith("http"):
-		logger.debug("Audio input provided as URL.")
-		audio_input = download_url_to_mp3(job_input_audio_url)
-	else:
-		logger.error("No audio input provided.")
-		return "No audio input provided"
+	logger.debug(f"Handler called with event: {event}")
 
 	try:
+		# ---------------------- Parse Input ----------------------
+		job_input = event["input"]
+		job_input_audio_base_64 = job_input.get("audio_base_64")
+		job_input_audio_url = job_input.get("audio")
+		job_input_language = job_input.get("language", DEFAULT_LANGUAGE_CODE)
+		initial_prompt = job_input.get("initial_prompt", "")
+		enable_timestamps = job_input.get("enable_timestamps", False)
+
+		# Metadata
+		conversation_id = job_input.get("conversation_id", "")
+		conversation_chunk_id = job_input.get("conversation_chunk_id", "")
+		metadata_str = job_input.get("metadata_str", "")
+
+		logger.info(f"Job input: {job_input}")
+		logger.debug(
+			f"audio_base_64 present: {bool(job_input_audio_base_64)}; audio_url: {job_input_audio_url}; language: {job_input_language}; initial_prompt: {initial_prompt}"
+		)
+
+		# ---------------------- Audio Preparation ----------------------
+		if job_input_audio_base_64:
+			logger.debug("Audio input provided as base64.")
+			audio_input = base64_to_tempfile(job_input_audio_base_64)
+		elif job_input_audio_url and job_input_audio_url.startswith("http"):
+			logger.debug("Audio input provided as URL.")
+			audio_input = download_url_to_mp3(job_input_audio_url)
+		else:
+			logger.error("No audio input provided.")
+			raise ValueError("No audio input provided")
+
+		# ---------------------- Language & Tokenizer ----------------------
 		if job_input_language not in supported_languages:
 			logger.info(
 				f"Language {job_input_language} not supported, using default: {DEFAULT_LANGUAGE_CODE}"
@@ -221,38 +313,60 @@ def handler(event):
 			combined_progress=DEBUG,
 		)
 
-		def process_segment(segment_tuple):
-			i, segment = segment_tuple
-			segment_text = segment["text"]
-			with detector_lock:
-				try:
-					detected_language = detect(segment_text)
-				except Exception as e:
-					logger.error(f"Error in detect: {e}")
-					detected_language = job_input_language
-			logger.debug(f"Segment {i}: Detected language: {detected_language}")
-			if detected_language != job_input_language:
-				logger.info(
-					f"Translating segment {i} from {detected_language} to {job_input_language}"
-				)
-				segment_text = translate_text(segment_text, job_input_language)
-			else:
-				logger.debug(f"Segment {i}: No translation needed")
-			return (i, segment_text)
-
 		if USE_LITELLM:
-			# then translate the segments in parallel if they are not the same language
-			with concurrent.futures.ThreadPoolExecutor(
-				max_workers=num_threads_available
-			) as executor:
-				results = executor.map(process_segment, enumerate(result["segments"]))
-			sorted_results = sorted(results, key=lambda x: x[0])
-			translated_segments = [str(text) for _, text in sorted_results]
+			# Translate segments in a single request per contiguous block that is in a different language.
+			translated_segments: list[str] = []
+			buffer: list[str] = []  # Holds consecutive segments that need translation
+			translation_error_occurred = False
+			hallucination_score = 0.0
+			hallucination_reason = ""
+
+			def flush_buffer():
+				"""Helper to translate the current buffer (if any) and append to translated_segments."""
+				nonlocal translation_error_occurred
+				if buffer:
+					combined_text = " ".join(buffer)
+					logger.info(
+						f"Translating buffered block of {len(buffer)} segment(s) to {job_input_language}"
+					)
+					translated_text, exit_code = translate_text(combined_text, job_input_language)
+					if exit_code != ExitCode.SUCCESS.value:
+						translation_error_occurred = True
+					translated_segments.append(translated_text)
+					buffer.clear()
+
+			for i, segment in enumerate(result["segments"]):
+				segment_text = segment["text"]
+				with detector_lock:
+					try:
+						detected_language = detect(segment_text)
+					except Exception as e:
+						logger.error(f"Error in detect for segment {i}: {e}")
+						detected_language = job_input_language
+
+				if detected_language != job_input_language:
+					# Keep accumulating until we hit a segment in the target language
+					buffer.append(segment_text)
+				else:
+					# Current segment is already in the target language, first flush any buffered items
+					flush_buffer()
+					translated_segments.append(segment_text)
+
+			# Flush remaining buffer after the loop completes
+			flush_buffer()
 
 			joined_text = " ".join(translated_segments)
+			# Hallucination detection after translation
+			if joined_text:
+				hallucination_score, hallucination_reason = detect_hallucination(joined_text, initial_prompt)
+				if hallucination_score > 0:
+					logger.info(f"Hallucination detected (score={hallucination_score}): {hallucination_reason}")
 		else:
 			joined_text = " ".join([segment["text"] for segment in result["segments"]])
-		
+			translation_error_occurred = False
+			hallucination_score = 0.0
+			hallucination_reason = ""
+
 		common_result = {
 			# metadata
 			"conversation_id": conversation_id,
@@ -261,7 +375,23 @@ def handler(event):
 			"enable_timestamps": enable_timestamps,
 			"language": job_input_language,
 			"joined_text": joined_text,
+			"translation_error": translation_error_occurred,
+			"hallucination_score": hallucination_score,
+			"hallucination_reason": hallucination_reason if hallucination_score > 0 else "",
 		}
+
+		# save this to output-partial.json if DEBUG is true
+		if DEBUG:
+			import json
+			documents_path = os.path.expanduser("~/Documents/output-partial.json")
+			with open(documents_path, "w") as f:
+				json.dump(common_result, f)
+
+		try:
+			if audio_input:
+				os.remove(audio_input)
+		except Exception as e:
+			logger.error(f"Error in cleanup: {e}")
 
 		if enable_timestamps:
 			return {
@@ -273,9 +403,32 @@ def handler(event):
 				**common_result,
 			}
 
+	# ---------------------- Global Exception Handler ----------------------
 	except Exception as e:
-		logger.error(f"An error occurred: {str(e)}")
-		return f"Error transcribing audio: {e}"
+		logger.error(f"Unhandled error: {str(e)}")
+		logger.error(traceback.format_exc())
+
+		try:
+			if audio_input:
+				os.remove(audio_input)
+		except Exception as e:
+			logger.error(f"Error in cleanup: {e}")
+
+		# Build minimal common metadata if available
+		common_meta = {
+			"conversation_id": locals().get("conversation_id", ""),
+			"conversation_chunk_id": locals().get("conversation_chunk_id", ""),
+			"metadata_str": locals().get("metadata_str", ""),
+			"enable_timestamps": locals().get("enable_timestamps", False),
+			"language": locals().get("job_input_language", DEFAULT_LANGUAGE_CODE),
+		}
+
+		# Return a generic error payload to the caller (includes metadata)
+		return {
+			**common_meta,
+			"error": str(e),
+			"message": "An unhandled error occurred while processing the request.",
+		}
 
 
 runpod.serverless.start({"handler": handler})
