@@ -177,8 +177,36 @@ def translate_text(text, language) -> tuple[str, int]:
 # Hallucination Detection
 # -----------------------------------
 
+HALLUCINATION_PROMPT = """You are an expert QA analyst specializing in reviewing speech-to-text (ASR) transcripts. Your task is to identify "hallucinations" without access to the original audio.
 
-def detect_hallucination(text: str, initial_prompt: str = "") -> tuple[float, str]:
+A hallucination is defined as text that is highly unlikely to have been spoken by a coherent human. You must infer this from textual evidence alone.
+
+**Crucially, distinguish between:**
+- **Hallucinations (High Penalty):** Invented phrases, nonsensical "word salad," illogical topic shifts, or repetitive loops that suggest ASR model failure.
+- **Minor Inaccuracies (Low/No Penalty):** Simple transcription errors (e.g., "their" vs "there"), misheard names, or the transcription of natural filler words (e.g., "um," "uh," "like"). Do not score these as severe hallucinations.
+
+**Evaluation Criteria (assign ONE score based on the MOST SEVERE issue found):**
+- **0.0 - No Hallucination:** The text is coherent and sounds like natural human speech or narration.
+- **0.1-0.3 - Minor:** Mostly coherent but contains a few slightly awkward or out-of-place words that make a phrase sound unnatural. Overall meaning is clear. (e.g., "I feel like can happen towards a link.")
+- **0.4-0.6 - Moderate:** Contains distracting nonsensical phrases or confusing sentences that disrupt the flow and partially obscure the meaning. (e.g., "you can't wait for our students" in a context that makes no sense.)
+- **0.7-0.9 - Severe:** Multiple incoherent passages, significant logical breaks, or repetitive loops. The core meaning is heavily obscured.
+- **1.0 - Complete:** The text is almost entirely gibberish, nonsensical, or stuck in a repetitive loop.
+
+**Primary Hallucination Signals to Look For:**
+1.  **Logical Incoherence or Nonsense:** Sentences or phrases that are grammatically malformed, self-contradictory, or simply make no sense.
+2.  **Semantic Repetition or Looping:** The same idea or phrase repeated unnaturally multiple times in a row.
+3.  **Abrupt and Illogical Topic Shifts:** Sudden changes in topic that lack any logical transition, suggesting the ASR model lost track.
+4.  **Inappropriate Jargon or "Word Salad":** Use of technical or specific terms that are completely out of context.
+
+Respond ONLY with a valid JSON object in the following format:
+{
+  "hallucination_score": <score from 0.0 to 1.0>,
+  "reason": "<A concise, max 20-word explanation for your score, citing the most significant issue.>"
+}
+"""
+
+
+def detect_hallucination(text: str) -> tuple[float, str]:
 	"""Detect hallucinations in text using LLM analysis and return a score between 0 (no hallucination) and 1 (severe hallucination)."""
 	logger.debug(f"Checking for hallucinations in text: {text[:100]}...")
 
@@ -187,41 +215,16 @@ def detect_hallucination(text: str, initial_prompt: str = "") -> tuple[float, st
 		return 0.0, ""
 
 	try:
-		context_info = (
-			f"\nContext from initial prompt: {initial_prompt}" if initial_prompt else ""
-		)
-
 		response = completion(
 			model=str(LITELLM_MODEL),
 			messages=[
 				{
 					"role": "system",
-					"content": (
-						"""You are an expert QA analyst for speech-to-text output. Your task is to detect hallucinations—words or passages that were not actually spoken but were invented by the ASR model.\n"
-						"\n"
-						"Evaluation criteria (assign ONE score):\n"
-						"0.0  – No hallucination detected.\n"
-						"0.1-0.3 – Minor: 1-2 short erroneous phrases, overall meaning intact.\n"
-						"0.4-0.6 – Moderate: Several errors that partially distort meaning.\n"
-						"0.7-0.9 – Severe: Frequent invented phrases or topic shifts that strongly distort meaning.\n"
-						"1.0  – Complete: Text is mostly or entirely hallucinated/nonsensical.\n"
-						"\n"
-						"Common hallucination signals to consider:\n"
-						"• Excessive repetition of words/phrases.\n"
-						"• Nonsensical or contradictory sequences.\n"
-						"• Abrupt topic changes without context.\n"
-						"• Technical terms used out of place.\n"
-						"• Filler sounds transcribed as words (um, uh, etc.).\n"
-						"\n"
-						"Respond ONLY with valid JSON: {\n"
-						"  \"hallucination_score\": <score from list above>,\n"
-						"  \"reason\": \"<max 20 words explaining key issues>\"\n"
-						"}"""
-					),
+					"content": HALLUCINATION_PROMPT,
 				},
 				{
 					"role": "user",
-					"content": f"Analyze this transcribed audio for hallucinations:{context_info}\n\nText: {text}",
+					"content": f"Analyze this ASR transcript for signs of hallucination. Transcript: {text}",
 				},
 			],
 			api_key=LITELLM_API_KEY,
@@ -358,7 +361,7 @@ def handler(event):
 			joined_text = " ".join(translated_segments)
 			# Hallucination detection after translation
 			if joined_text:
-				hallucination_score, hallucination_reason = detect_hallucination(joined_text, initial_prompt)
+				hallucination_score, hallucination_reason = detect_hallucination(joined_text)
 				if hallucination_score > 0:
 					logger.info(f"Hallucination detected (score={hallucination_score}): {hallucination_reason}")
 		else:
@@ -374,10 +377,10 @@ def handler(event):
 			"metadata_str": metadata_str,
 			"enable_timestamps": enable_timestamps,
 			"language": job_input_language,
-			"joined_text": joined_text,
 			"translation_error": translation_error_occurred,
 			"hallucination_score": hallucination_score,
 			"hallucination_reason": hallucination_reason if hallucination_score > 0 else "",
+			"joined_text": joined_text,
 		}
 
 		try:
