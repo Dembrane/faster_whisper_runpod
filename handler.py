@@ -1,26 +1,30 @@
 import runpod
-import whisperx
 import base64
 import tempfile
 import requests
 import os
-import threading
 import enum
 import torch
+from faster_whisper import WhisperModel, BatchedInferencePipeline
+from faster_whisper.audio import decode_audio
 from runpod import RunPodLogger
-from faster_whisper.tokenizer import Tokenizer
-from dataclasses import replace
-from langdetect import detect
 from litellm import completion
 from litellm.exceptions import Timeout
 from dotenv import load_dotenv
 import traceback
+import logging
 
-load_dotenv()
-# Global lock to ensure thread-safe calls to detect()
-detector_lock = threading.Lock()
+load_dotenv(verbose=True, override=True)
 
 logger = RunPodLogger()
+
+# default to false
+DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
+logger.info(f"Debug mode: {DEBUG}")
+
+if DEBUG:
+	logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
+
 
 if not torch.cuda.is_available() or os.getenv("USE_CPU") == "1":
 	logger.info("CUDA is not available")
@@ -39,8 +43,14 @@ else:
 
 
 # number of segments to process at once
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "8"))
-WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "Systran/faster-whisper-large-v1")
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
+logger.info(f"Using batch size: {BATCH_SIZE}")
+
+WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "Systran/faster-whisper-large-v3")
+logger.info(f"Using model: {WHISPER_MODEL_NAME}")
+
+# translate - convert to english
+# transcribe - output in target language
 TASK = os.getenv("TASK", "transcribe")
 DEFAULT_LANGUAGE_CODE = "en"
 
@@ -57,47 +67,33 @@ if LITELLM_MODEL and LITELLM_API_KEY:
 	logger.info("Using LiteLLM for translation")
 
 
-# default to false
-DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
-
-logger.info(f"Using model: {WHISPER_MODEL_NAME}")
-
-logger.info("Loading the models")
-
 num_threads_available = os.cpu_count()
 logger.info(f"threads available: {num_threads_available}")
 
-model = whisperx.load_model(
+# model = whisperx.load_model(
+# 	WHISPER_MODEL_NAME,
+# 	device=device,
+# 	compute_type=compute_type,
+# 	download_root="models",
+# 	threads=num_threads_available,
+# )
+
+model = WhisperModel(
 	WHISPER_MODEL_NAME,
 	device=device,
 	compute_type=compute_type,
 	download_root="models",
-	threads=num_threads_available,
 )
 
+batched_model = BatchedInferencePipeline(
+	model,
+)
 
-assert model.tokenizer is None, "Tokenizer is loaded. exit."
 
 logger.info(f"Model loaded: {model}")
 
 # Supported languages
 supported_languages = os.getenv("SUPPORTED_LANGUAGES", "en,nl").split(",")
-
-# Prepare tokenizers for all supported languages
-tokenizers = {}
-for lang in supported_languages:
-	logger.info(f"Creating tokenizer for {lang}")
-	tokenizers[lang] = Tokenizer(
-		model.model.hf_tokenizer,
-		# this has to be True, otherwise in Tokenizer self.language_code is set to "en"
-		multilingual=True,
-		# from load_model they are passed to the tokenizer
-		task=TASK,
-		language=lang,
-	)
-
-logger.info(f"Tokenizers created: {list(tokenizers.keys())}")
-
 
 def base64_to_tempfile(base64_data):
 	logger.debug("Decoding base64 audio data to tempfile.")
@@ -258,7 +254,8 @@ def handler(event):
 		job_input_audio_base_64 = job_input.get("audio_base_64")
 		job_input_audio_url = job_input.get("audio")
 		job_input_language = job_input.get("language", DEFAULT_LANGUAGE_CODE)
-		initial_prompt = job_input.get("initial_prompt", "")
+		initial_prompt = job_input.get("initial_prompt", None)
+		hotwords = job_input.get("hotwords", None)
 		enable_timestamps = job_input.get("enable_timestamps", False)
 
 		# Metadata
@@ -281,7 +278,7 @@ def handler(event):
 		else:
 			logger.error("No audio input provided.")
 			raise ValueError("No audio input provided")
-
+		
 		# ---------------------- Language & Tokenizer ----------------------
 		if job_input_language not in supported_languages:
 			logger.info(
@@ -289,94 +286,74 @@ def handler(event):
 			)
 			job_input_language = DEFAULT_LANGUAGE_CODE
 
-		logger.info(f"Using language: {job_input_language}")
-		tokenizer = tokenizers.get(job_input_language)
-		logger.debug(f"Tokenizer for {job_input_language}: {tokenizer}")
-
-		new_options = {
-			"initial_prompt": initial_prompt,
-			"word_timestamps": enable_timestamps,
-			"without_timestamps": False,
-		}
-		logger.debug(f"Setting model options: {new_options}")
-		model.tokenizer = tokenizer
-		model.options = replace(model.options, **new_options)
-
 		logger.debug(f"Loading audio from: {audio_input}")
-		audio = whisperx.load_audio(audio_input)
+		audio = decode_audio(audio_input)
 		logger.debug("Audio loaded. Running transcription.")
 
-		result = model.transcribe(
-			audio,
+		segments, info = batched_model.transcribe(
+			audio=audio,
+			# task: Task to perform. "transcribe" transcribes the audio to text. "translate" transcribes the audio to text and translates it to the target language.
 			task=TASK,
-			batch_size=BATCH_SIZE,
+			# hotwords: Hotwords/hint phrases to the model. Has no effect if prefix is not None.
+			hotwords=hotwords,
+			# language: language: The language spoken in the audio. It should be a language code such as "en" or "fr". If not set, the language will be detected in the first 30 seconds of audio.
 			language=job_input_language,
-			verbose=DEBUG,
-			print_progress=DEBUG,
-			combined_progress=DEBUG,
+			word_timestamps=enable_timestamps,
+			# multilingual: Perform language detection on every segment.
+			multilingual=True,
+			batch_size=BATCH_SIZE,
+			log_progress=DEBUG,
+			initial_prompt=initial_prompt,
 		)
 
+
+		generated_segments = []
+
+		for seg_el in segments:
+			words = []
+			for word_el in seg_el.words:
+				words.append({
+					"word": word_el.word,
+					"start": word_el.start,
+					"end": word_el.end,
+				})
+			
+			append_obj = {
+				"text": seg_el.text,
+				"words": words,
+				"start": seg_el.start,
+				"end": seg_el.end,
+			}
+			 
+			generated_segments.append(append_obj)
+			
+			if DEBUG:
+				logger.debug(f"decoded segment: {append_obj}")
+
+
+		joined_text = " ".join([segment["text"] for segment in generated_segments])
+
+		translation_error_occurred = False
+		hallucination_score = 0.0
+		hallucination_reason = ""
+
 		if USE_LITELLM:
-			# Translate segments in a single request per contiguous block that is in a different language.
-			translated_segments: list[str] = []
-			buffer: list[str] = []  # Holds consecutive segments that need translation
-			translation_error_occurred = False
-			hallucination_score = 0.0
-			hallucination_reason = ""
-
-			def flush_buffer():
-				"""Helper to translate the current buffer (if any) and append to translated_segments."""
-				nonlocal translation_error_occurred
-				if buffer:
-					combined_text = " ".join(buffer)
-					logger.info(
-						f"Translating buffered block of {len(buffer)} segment(s) to {job_input_language}"
-					)
-					translated_text, exit_code = translate_text(combined_text, job_input_language)
-					if exit_code != ExitCode.SUCCESS.value:
-						translation_error_occurred = True
-					translated_segments.append(translated_text)
-					buffer.clear()
-
-			for i, segment in enumerate(result["segments"]):
-				segment_text = segment["text"]
-				with detector_lock:
-					try:
-						detected_language = detect(segment_text)
-					except Exception as e:
-						logger.error(f"Error in detect for segment {i}: {e}")
-						detected_language = job_input_language
-
-				if detected_language != job_input_language:
-					# Keep accumulating until we hit a segment in the target language
-					buffer.append(segment_text)
-				else:
-					# Current segment is already in the target language, first flush any buffered items
-					flush_buffer()
-					translated_segments.append(segment_text)
-
-			# Flush remaining buffer after the loop completes
-			flush_buffer()
-
-			joined_text = " ".join(translated_segments)
-			# Hallucination detection after translation
 			if joined_text:
 				hallucination_score, hallucination_reason = detect_hallucination(joined_text)
-				if hallucination_score > 0:
-					logger.info(f"Hallucination detected (score={hallucination_score}): {hallucination_reason}")
-		else:
-			joined_text = " ".join([segment["text"] for segment in result["segments"]])
-			translation_error_occurred = False
-			hallucination_score = 0.0
-			hallucination_reason = ""
+				if hallucination_score >= 0.9:
+					logger.info(f"Severe hallucination detected (score={hallucination_score}): {hallucination_reason}")
+				elif hallucination_score >= 0.5:
+					logger.info(f"Moderate hallucination detected (score={hallucination_score}): {hallucination_reason}")
 
-		common_result = {
+		result = {
 			# metadata
 			"conversation_id": conversation_id,
 			"conversation_chunk_id": conversation_chunk_id,
 			"metadata_str": metadata_str,
 			"enable_timestamps": enable_timestamps,
 			"language": job_input_language,
+			"whisper_language": info.language_probability,
+			"whisper_language_probability": info.language_probability,
 			"translation_error": translation_error_occurred,
 			"hallucination_score": hallucination_score,
 			"hallucination_reason": hallucination_reason if hallucination_score > 0 else "",
@@ -390,14 +367,14 @@ def handler(event):
 			logger.error(f"Error in cleanup: {e}")
 
 		if enable_timestamps:
-			return {
-				**common_result,
-				"segments": result["segments"],
-			}
-		else:
-			return {
-				**common_result,
-			}
+			result["segments"] = generated_segments
+
+		if DEBUG:
+			import json
+			with open("/tmp/result.json", "w") as f:
+				json.dump(result, f)
+
+		return result
 
 	# ---------------------- Global Exception Handler ----------------------
 	except Exception as e:
@@ -407,8 +384,8 @@ def handler(event):
 		try:
 			if audio_input:
 				os.remove(audio_input)
-		except Exception as e:
-			logger.error(f"Error in cleanup: {e}")
+		except Exception as inner_e:
+			logger.error(f"Error in cleanup: {inner_e}")
 
 		# Build minimal common metadata if available
 		common_meta = {
