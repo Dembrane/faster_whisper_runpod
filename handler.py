@@ -46,7 +46,7 @@ else:
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
 logger.info(f"Using batch size: {BATCH_SIZE}")
 
-WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "Systran/faster-whisper-large-v3")
+WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "Systran/faster-whisper-large-v1")
 logger.info(f"Using model: {WHISPER_MODEL_NAME}")
 
 USE_LITELLM = False

@@ -2,3 +2,4 @@ runpod==1.7.*
 python-dotenv==1.1.*
 faster-whisper==1.1.*
 litellm==1.59.*
+torch==2.7.*
