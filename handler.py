@@ -182,7 +182,6 @@ def translate_text(
             api_key=LITELLM_API_KEY,
             api_version=LITELLM_API_VERSION,
             api_base=LITELLM_API_BASE,
-            timeout=20
         )
         translated_text = response.choices[0].message.content
         logger.debug(f"Translation response: {translated_text}")
@@ -267,7 +266,6 @@ def detect_hallucination(text: str, hotwords: str = "") -> tuple[float, str]:
             api_version=LITELLM_API_VERSION,
             api_base=LITELLM_API_BASE,
             response_format={"type": "json_object"},
-            timeout=10
         )
         # ... (rest of the function remains the same)
         result = response.choices[0].message.content
