@@ -2,60 +2,59 @@ FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# Set Work Directory
+# Consolidated environment variables
+ENV PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PATH="/app/venv/bin:$PATH"
+
 WORKDIR /app
 
-# Environment variables
-ENV PYTHONUNBUFFERED=True
-ENV DEBIAN_FRONTEND=noninteractive
-ENV SHELL=/bin/bash
-ENV PIP_NO_CACHE_DIR=1
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1
-
-# Update, upgrade, install packages and clean up
+# Single RUN layer for system dependencies - Ubuntu 22.04 ships with Python 3.10.12
 RUN apt-get update && \
-    apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
-    bash \
-    ca-certificates \
-    curl \
-    git \
-    pkg-config \
-    zip \
-    build-essential \
-    software-properties-common && \
-    add-apt-repository ppa:deadsnakes/ppa && \
-    apt-get update && \
-    apt-get install -y python3.10 python3.10-venv python3.10-distutils && \
-    apt-get autoremove -y && \
+        python3.10 \
+        python3.10-venv \
+        python3.10-dev \
+        ca-certificates \
+        curl \
+        git \
+        pkg-config \
+        && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Copy static FFmpeg binaries from official image
-COPY --from=mwader/static-ffmpeg:7.1.1 /ffmpeg /usr/local/bin/ffmpeg
-COPY --from=mwader/static-ffmpeg:7.1.1 /ffprobe /usr/local/bin/ffprobe
+# Copy FFmpeg binaries in single layer
+COPY --from=mwader/static-ffmpeg:7.1.1 /ffmpeg /ffprobe /usr/local/bin/
 RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
 
-RUN python3.10 -m venv venv
-ENV PATH="/app/venv/bin:$PATH"
+# Create venv and install Python dependencies
+RUN python3.10 -m venv venv && \
+    pip install --upgrade pip setuptools wheel
 
-# Install requirements in smaller chunks to avoid memory issues
-RUN pip install --upgrade pip setuptools wheel
+# Copy requirements first for better cache utilization
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# ------------------- download model weights during build -------------------
-# This places the model inside /app/models so runtime startup is instant.
-# If the model is gated, pass a token at build time:  
-#   docker build --build-arg HF_TOKEN=xxx -t myimage .
-# The python snippet picks up that token automatically via the env-var.
+# Uncomment and modify for model preloading during build
 # ARG HF_TOKEN
 # ENV HF_TOKEN=${HF_TOKEN}
-# RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='deepdml/faster-whisper-large-v3-turbo-ct2', local_dir='models', local_dir_use_symlinks=False, resume_download=True)"
-# ---------------------------------------------------------------------------
+# RUN python -c "
+#     from huggingface_hub import snapshot_download
+#     snapshot_download(
+#         repo_id='deepdml/faster-whisper-large-v3-turbo-ct2',
+#         local_dir='models',
+#         local_dir_use_symlinks=False,
+#         resume_download=True
+#     )"
 
-COPY handler.py .
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash --uid 1000 appuser && \
+    chown -R appuser:appuser /app
+USER appuser
+
+COPY --chown=appuser:appuser handler.py .
 
 STOPSIGNAL SIGINT
-
 CMD ["python", "-u", "handler.py"]
