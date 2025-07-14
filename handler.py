@@ -296,6 +296,7 @@ def clean_up_audio(audio_input = None):
 
 def handler(event):
 	logger.debug(f"Handler called with event: {event}")
+	audio_input = None
 
 	try:
 		# ---------------------- Parse Input ----------------------
@@ -305,7 +306,7 @@ def handler(event):
 		job_input_language = job_input.get("language", None)
 		initial_prompt = job_input.get("initial_prompt", None)
 		if initial_prompt and len(initial_prompt) > 0:
-			logger.warning("initial_prompt is deprecated and will be removed in a future version. Please use the hotwords parameter instead.")
+			logger.info("initial_prompt is deprecated and will be removed in a future version. Please use the hotwords parameter instead.")
 		hotwords = job_input.get("hotwords", None)
 		enable_timestamps = job_input.get("enable_timestamps", False)
 		disable_hallucination_detection = job_input.get(
@@ -339,7 +340,6 @@ def handler(event):
 		else:
 			logger.error("No audio input provided.")
 			raise ValueError("No audio input provided")
-
 		logger.debug(f"Loading audio from: {audio_input}")
 		audio = decode_audio(audio_input)
 		logger.debug("Audio loaded. Running transcription.")
@@ -473,6 +473,7 @@ def handler(event):
 	except Exception as e:
 		logger.error(f"Unhandled error: {str(e)}")
 		logger.error(traceback.format_exc())
+
 
 		clean_up_audio(audio_input)
 
