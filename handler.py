@@ -295,6 +295,7 @@ def clean_up_audio(audio_input = None):
 
 
 def handler(event):
+	MIN_LANGUAGE_CONFIDENCE_THRESHOLD = 0.8
 	logger.debug(f"Handler called with event: {event}")
 	audio_input = None
 
@@ -393,10 +394,12 @@ def handler(event):
 		translation_text = None
 		translation_error = None
 
+		# Add threshold of detected language confidence to determine if translation is needed
 		needs_translation = (
 			not disable_translation and
 			job_input_language and
-			info.language != job_input_language
+			info.language != job_input_language and
+			info.language_probability < MIN_LANGUAGE_CONFIDENCE_THRESHOLD
 		)
 
 		if needs_translation:
@@ -411,6 +414,8 @@ def handler(event):
 				logger.debug("Translation not needed because disable_translation is True")
 			elif not job_input_language:
 				logger.debug("Translation not needed because no language was provided")
+			elif info.language_probability >= MIN_LANGUAGE_CONFIDENCE_THRESHOLD:
+				logger.debug(f"Translation not needed because detected language matches input language. \n({info.language}-{info.language_probability} / desired {job_input_language})")
 			else:
 				logger.debug(f"Translation not needed because detected language matches input language. \n({info.language}-{info.language_probability} / desired {job_input_language})")
 
